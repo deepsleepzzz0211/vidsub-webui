@@ -1,6 +1,6 @@
 import { test as base, expect } from '@playwright/test';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -11,6 +11,7 @@ const PROBE = '/__vidsub_alive';
 export type Fixtures = {
   serverUrl: string;
   dataDir: string;
+  tmpDir: string;
 };
 
 /**
@@ -80,6 +81,9 @@ async function stopTree(proc: ChildProcess): Promise<void> {
 /**
  * 每个用例一套隔离环境：
  * - 数据目录指向临时位置，**绝不读写开发者自己的 ~/.vidsub**
+ * - HuggingFace / ModelScope 的缓存根也重定向到临时位置：否则"重扫缓存"
+ *   会读到开发者自己 ~/.cache/huggingface 里的真实权重，导致结果随机器而变
+ *   （别人机器上缓存里有 → 用例失败）
  * - 随机空闲端口，避免与本机在跑的实例冲突
  * - 只绑 127.0.0.1
  */
@@ -94,6 +98,13 @@ export const test = base.extend<Fixtures>({
     }
   },
 
+  // 用户自己放权重的目录（用于"手动指定目录"这类用例）
+  tmpDir: async ({ dataDir }, use) => {
+    const dir = path.join(dataDir, 'user-library');
+    mkdirSync(dir, { recursive: true });
+    await use(dir);
+  },
+
   serverUrl: async ({ dataDir }, use) => {
     const port = await freePort();
     const proc: ChildProcess = spawn(
@@ -103,6 +114,10 @@ export const test = base.extend<Fixtures>({
         env: {
           ...process.env,
           VIDSUB_DATA_DIR: dataDir,
+          // 把缓存根也隔离，避免读到开发者机器上的真实权重
+          HF_HOME: path.join(dataDir, 'hf'),
+          HF_HUB_CACHE: path.join(dataDir, 'hf', 'hub'),
+          MODELSCOPE_CACHE: path.join(dataDir, 'mscache'),
           // 免得本地请求被系统代理劫持
           http_proxy: '', https_proxy: '', HTTP_PROXY: '', HTTPS_PROXY: '',
           // 真实推理阶段会开浏览器窗口，E2E 里必须关掉

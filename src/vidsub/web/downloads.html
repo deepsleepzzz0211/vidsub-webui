@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vidsub · 模型</title>
+<style>
+  :root { color-scheme: light dark; --ok:#2e7d32; --err:#c62828; --wait:#8d6e63; }
+  * { box-sizing: border-box; }
+  body {
+    font: 16px/1.65 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    margin: 0; min-height: 100vh; display: grid; place-items: start center;
+  }
+  main { max-width: 52rem; padding: 2rem 1.5rem 4rem; width: 100%; }
+  h1 { font-size: 1.35rem; margin: 0 0 .3rem; }
+  h2 { font-size: 1rem; margin: 2rem 0 .6rem; }
+  .lede { margin: 0 0 1.5rem; opacity: .78; }
+  .bar {
+    height: 8px; border-radius: 99px; overflow: hidden;
+    background: rgba(128,128,128,.22); margin: .5rem 0 1.5rem;
+  }
+  .bar > i { display:block; height:100%; width:0; background: currentColor; transition: width .25s; }
+  .overall { display:flex; justify-content:space-between; font-variant-numeric: tabular-nums; }
+  ul { list-style:none; margin:0; padding:0; }
+  li {
+    border:1px solid rgba(128,128,128,.28); border-radius:10px;
+    padding:.8rem 1rem; margin-bottom:.6rem;
+  }
+  .row { display:flex; justify-content:space-between; gap:1rem; align-items:baseline; }
+  .name { font-weight:600; }
+  .size { opacity:.6; font-variant-numeric: tabular-nums; white-space:nowrap; }
+  .state { font-size:.85rem; margin-top:.15rem; }
+  .state.ready { color: var(--ok); }
+  .state.error, .state.failed { color: var(--err); }
+  .state.partial, .state.downloading { color: var(--wait); }
+  .note { font-size:.82rem; opacity:.72; margin-top:.3rem; }
+  .itembar { height:4px; border-radius:99px; background:rgba(128,128,128,.2); margin-top:.5rem; overflow:hidden; }
+  .itembar > i { display:block; height:100%; width:0; background:currentColor; }
+  button {
+    font: inherit; padding:.55rem 1.3rem; border-radius:9px; cursor:pointer;
+    border:1px solid currentColor; background:transparent; color:inherit;
+  }
+  button:disabled { opacity:.45; cursor:default; }
+  button.primary { background: currentColor; color: var(--bg, Canvas); }
+  input {
+    font: inherit; padding:.5rem .7rem; border-radius:9px; width: 100%;
+    border:1px solid rgba(128,128,128,.45); background:transparent; color:inherit;
+  }
+  .row2 { display:flex; gap:.6rem; margin-top:.7rem; }
+  .row2 input { flex: 1; }
+  .msg { font-size:.9rem; }
+  .msg.error { color: var(--err); }
+  .msg.ok { color: var(--ok); }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+  code { font-size:.82rem; }
+  .box {
+    border:1px solid rgba(128,128,128,.28); border-radius:10px;
+    padding:.9rem 1rem; margin-bottom:.6rem; background:rgba(128,128,128,.06);
+  }
+  .box .curl {
+    display:block; margin:.5rem 0 .35rem; padding:.5rem .6rem;
+    background:rgba(128,128,128,.12); border-radius:7px;
+    word-break: break-all; user-select: all;
+  }
+  .hint-list { max-height: 22rem; overflow:auto; padding-right:.3rem; }
+  details > summary { cursor:pointer; opacity:.85; font-size:.9rem; }
+  .paths { font-size:.82rem; opacity:.8; }
+  a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <h1>模型权重</h1>
+  <p class="lede">
+    需要四个权重（约 2.6 GB）。会先在 HuggingFace / ModelScope 的标准缓存里找，
+    找到就直接收编（认领时按 sha256 校验，同盘走硬链接，不占额外空间）。
+    没有的话再下载。
+  </p>
+
+  <div class="overall">
+    <span id="pct">0%</span>
+    <span id="bytes" class="size"></span>
+  </div>
+  <div class="bar"><i id="bar"></i></div>
+
+  <ul id="items"></ul>
+
+  <div class="row2">
+    <button id="go" class="primary">开始下载</button>
+    <button id="rescan">重新查找本机缓存</button>
+    <span id="msg" class="msg"></span>
+  </div>
+
+  <h2>已经下好了？指个目录</h2>
+  <p class="lede" style="margin-bottom:.4rem">
+    指向你存权重的文件夹，按 sha256 认领里面的文件（文件名和层级都不要求）。
+  </p>
+  <div class="row2">
+    <input id="manual" placeholder="例如 D:\models 或 /data/models" spellcheck="false">
+    <button id="adopt">认领</button>
+  </div>
+  <p class="msg" id="manualMsg"></p>
+
+  <div id="more"></div>
+
+  <p class="note" style="margin-top:2.5rem">
+    识别模型使用网易自定义协议（不是 Apache 2.0），协议全文随权重一起保存到本机。
+    默认从 ModelScope 下载。
+  </p>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+const STATE_TEXT = {
+  missing: '未下载', partial: '可续传', ready: '已就绪',
+  corrupt: '已损坏，将重新下载', downloading: '下载中',
+  pending: '等待中', failed: '失败',
+};
+
+function fmt(n) {
+  if (!n) return '0 B';
+  // 2 GB 以内一律用 MB：1.1 GB 的权重按 1024 进位会写成 "1.0 GB"，
+  // 看不出是 1056 还是 1024，跟用户自己那份文件对不上。
+  // 规则与后端 discovery.human_size 一致。
+  const mb = n / 1048576;
+  if (mb < 0.1) return `${Math.round(n / 1024)} KB`;
+  if (mb < 2048) return `${mb.toFixed(1)} MB`;
+  return `${(mb / 1024).toFixed(2)} GB`;
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"]/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+function render(s) {
+  const pct = Math.round((s.progress || 0) * 100);
+  $('bar').style.width = pct + '%';
+  $('pct').textContent = pct + '%';
+  $('bytes').textContent = `${fmt(s.have_bytes)} / ${fmt(s.total_bytes)}`;
+
+  $('items').innerHTML = (s.items || []).map((i) => {
+    const ratio = i.total ? Math.min(1, i.have / i.total) : 0;
+    return `<li>
+      <div class="row">
+        <span class="name">${esc(i.label)}</span>
+        <span class="size">${fmt(i.have)} / ${fmt(i.total)}</span>
+      </div>
+      <div class="state ${i.state}">${STATE_TEXT[i.state] || i.state}</div>
+      ${i.note ? `<div class="note">${esc(i.note.split('\n')[0])}</div>` : ''}
+      ${(i.state === 'downloading' || i.state === 'partial')
+        ? `<div class="itembar"><i style="width:${ratio * 100}%"></i></div>` : ''}
+    </li>`;
+  }).join('');
+
+  const running = s.state === 'running';
+  $('go').disabled = running || pct >= 100;
+  $('go').textContent = running ? '下载中…'
+    : (pct >= 100 ? '已完成' : (pct > 0 ? '继续下载' : '开始下载'));
+
+  if (s.state === 'error' && s.error) {
+    $('msg').className = 'msg error';
+    $('msg').textContent = s.error.split('\n')[0];
+  } else if (pct >= 100) {
+    $('msg').className = 'msg ok';
+    $('msg').innerHTML = '全部就绪，<a href="/">去上传视频</a>';
+  } else {
+    $('msg').className = 'msg';
+    $('msg').textContent = '';
+  }
+
+  renderMore(s);
+}
+
+function renderMore(s) {
+  const c = s.caches || { roots: [], found: {} };
+  const missing = (s.hints || []);
+  const found = Object.entries(c.found);
+
+  const roots = c.roots.map((r) => `
+    <li>
+      <div class="row"><span class="name">${esc(r.kind)} 缓存</span>
+        <span class="size">${r.exists ? '存在' : '不存在'}</span></div>
+      <div class="paths mono">${esc(r.path)} <span class="note">${
+        r.env_var ? `（由 ${esc(r.env_var)} 指定）` : '（默认位置）'}</span></div>
+    </li>`).join('');
+
+  const hints = missing.length ? `
+    <h2>这些还没找到 —— 可以自己去魔搭下</h2>
+    <p class="lede" style="margin-bottom:.6rem">
+      下面是每个权重在 ModelScope 上的直链与可续传命令（<code>-C -</code> 表示断了能接着下）。
+      只下单个文件，不整个仓库 —— GGUF 仓库里还有 Q8_0 / f16 等其它量化，整个下会多花好几倍。
+    </p>
+    <div class="hint-list">${missing.map((h) => `
+      <div class="box">
+        <div class="row"><span class="name">${esc(h.label)}</span>
+          <span class="size">${esc(h.size_text)}</span></div>
+        <div class="note mono">${esc(h.repo)} / ${esc(h.path)}</div>
+        <code class="curl">${esc(h.curl.replace('<模型目录>', '.'))}</code>
+        <div class="note"><a href="${esc(h.url)}" target="_blank" rel="noopener">直接打开链接</a> · ${esc(h.note)}</div>
+      </div>`).join('')}</div>` : '';
+
+  $('more').innerHTML = `
+    <h2>找过这些地方</h2>
+    <ul>${roots}</ul>
+    <details><summary>缓存里找到的东西（按 sha256 校验后收编）</summary>
+      <p class="paths">${
+        found.length
+          ? found.map(([k, v]) => `${esc(k)} ← <span class="mono">${esc(v.path)}</span>（来自 ${esc(v.source)}）`).join('<br>')
+          : '标准缓存里没有这四个权重。'
+      }</p>
+      <p class="note">点上面的「重新查找本机缓存」会把找到的收编进来。</p>
+    </details>
+    ${hints}`;
+}
+
+async function poll() {
+  try {
+    const r = await fetch('/api/models');
+    render(await r.json());
+  } catch (e) {
+    $('msg').className = 'msg error';
+    $('msg').textContent = '无法连接服务：' + e.message;
+  }
+}
+
+$('go').addEventListener('click', async () => {
+  $('go').disabled = true;
+  try {
+    await fetch('/api/models/download', { method: 'POST' });
+  } catch (e) {
+    $('msg').className = 'msg error';
+    $('msg').textContent = '启动下载失败：' + e.message;
+  }
+  poll();
+});
+
+$('rescan').addEventListener('click', async () => {
+  $('rescan').disabled = true;
+  try {
+    const r = await fetch('/api/models/rescan', { method: 'POST' });
+    const b = await r.json();
+    const ok = (b.results || []).filter((x) => x.ok).length;
+    $('msg').className = ok ? 'msg ok' : 'msg';
+    $('msg').textContent = ok
+      ? `从缓存收编了 ${ok} 个权重`
+      : '标准缓存里没找到';
+  } catch (e) {
+    $('msg').className = 'msg error';
+    $('msg').textContent = '查找失败：' + e.message;
+  }
+  $('rescan').disabled = false;
+  poll();
+});
+
+$('adopt').addEventListener('click', async () => {
+  const path = $('manual').value.trim();
+  if (!path) return;
+  $('adopt').disabled = true;
+  $('manualMsg').className = 'msg';
+  $('manualMsg').textContent = '正在按 sha256 校验…（1.1 GB 的权重要算一会儿）';
+  try {
+    const r = await fetch('/api/models/adopt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+    const b = await r.json();
+    if (!r.ok) {
+      $('manualMsg').className = 'msg error';
+      $('manualMsg').textContent = b.error || '认领失败';
+    } else {
+      const ok = (b.results || []).filter((x) => x.ok).length;
+      $('manualMsg').className = 'msg ok';
+      $('manualMsg').textContent = `认领了 ${ok} 个权重` +
+        ((b.results || []).some((x) => x.linked) ? '（同盘硬链接，未占用额外空间）' : '');
+    }
+  } catch (e) {
+    $('manualMsg').className = 'msg error';
+    $('manualMsg').textContent = '认领失败：' + e.message;
+  }
+  $('adopt').disabled = false;
+  poll();
+});
+
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>

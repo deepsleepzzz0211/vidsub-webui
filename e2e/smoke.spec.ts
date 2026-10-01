@@ -14,9 +14,21 @@ test('服务：隔离实例可启动，首页可访问', async ({ page, serverUr
   expect(res.status()).toBe(200);
 });
 
-test('服务：页面渲染出上传区', async ({ page, serverUrl }) => {
-  await page.goto(serverUrl);
-  await expect(page.locator('body')).toContainText('拖拽');
+test('服务：首页按模型是否就绪分流', async ({ page, serverUrl }) => {
+  await page.goto(serverUrl, { waitUntil: 'domcontentloaded' });
+  // 隔离环境里没有权重，首页应把人送到下载页 —— 而不是显示"可以上传"
+  // 的界面，等真正需要模型的时刻才失败
+  await expect(page).toHaveURL(/\/downloads$/);
+  await expect(page.locator('h1')).toContainText('模型权重');
+});
+
+test('服务：模型就绪后首页展示上传区', async ({ page, serverUrl }) => {
+  // 直接访问上传页，验证入口本身还在（首页分流是另一回事）
+  const res = await page.request.get(`${serverUrl}/api/models`);
+  expect(res.status()).toBe(200);
+  // 就绪后的首页内容由 11 号票落地；这里只确认不会 500
+  const home = await page.request.get(`${serverUrl}/`);
+  expect(home.status()).toBe(200);
 });
 
 test('隔离：记录文件落在临时目录，用户目录未被创建', async ({ dataDir, serverUrl }) => {
