@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# 测试与缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 模型权重与运行时产物：绝不入库（协议 3.4b 要求每个副本保留协议全文，
+# 但权重本身体积以 GB 计，且分发需遵守许可条件）
+*.gguf
+*.onnx
+*.bin
+*.safetensors
+models/
+bin/
+
+# 作业产物：用户上传的视频、成片、临时工作目录
+# 可能是几十 GB，且属于用户内容，不应进版本库
+data/
+work/
+jobs/
+*.srt
+*.mp4
+*.webm
+*.mkv
+*.wav
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

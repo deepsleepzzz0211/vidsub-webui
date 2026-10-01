@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vidsub"
+version = "0.1.0"
+description = "本地运行的双语字幕工具：上传视频，得到烧录好中英双语字幕的成片"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "numpy>=1.24",
+    "onnxruntime>=1.16",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+# 只有启动器一个入口：没有子命令 CLI，用户执行 python -m vidsub 即可。
+[project.scripts]
+vidsub = "vidsub.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+vidsub = ["web/*.html", "web/*.css", "web/*.js"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
