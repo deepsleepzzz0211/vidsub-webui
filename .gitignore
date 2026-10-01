@@ -37,3 +37,10 @@ jobs/
 .idea/
 .DS_Store
 Thumbs.db
+
+# E2E（Playwright）
+node_modules/
+test-results/
+playwright-report/
+blob-report/
+.playwright/
