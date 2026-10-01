@@ -32,3 +32,6 @@ vidsub = ["web/*.html", "web/*.css", "web/*.js"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "e2e_support: 需要起真实服务/端口的测试，普通单元测试用 -m 'not e2e_support' 跳过",
+]

@@ -44,3 +44,12 @@ test-results/
 playwright-report/
 blob-report/
 .playwright/
+
+# E2E 素材缓存：仓库只留获取脚本，媒体文件不入库
+.e2e-cache/
+
+# 音频同样不入库。VIDSUB_E2E_CACHE 通常是绝对路径，靠上面的目录名规则
+# 兜不住；显式忽略扩展名才是可靠的那一层。
+*.mp3
+*.aac
+*.m4a

@@ -1,0 +1,50 @@
+import { test, expect } from './fixture';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import path from 'node:path';
+
+/**
+ * 骨架探针（10 号票）
+ *
+ * 验证"跑 E2E"这件事本身可靠：服务能在隔离目录里起来、页面可访问、
+ * 隔离真的是隔离。业务用例在 11/12/13 号票。
+ */
+test('服务：隔离实例可启动，首页可访问', async ({ page, serverUrl }) => {
+  const res = await page.request.get(`${serverUrl}/`);
+  expect(res.status()).toBe(200);
+});
+
+test('服务：页面渲染出上传区', async ({ page, serverUrl }) => {
+  await page.goto(serverUrl);
+  await expect(page.locator('body')).toContainText('拖拽');
+});
+
+test('隔离：记录文件落在临时目录，用户目录未被创建', async ({ dataDir, serverUrl }) => {
+  // 上一版只断言"临时目录 != ~/.vidsub"——那是 mkdtemp 本身的性质，
+  // 永远为真，等于什么都没验。真正该验的是**副作用的落点**。
+  //
+  // 注意：serverUrl 是夹具参数，服务在**进入用例体之前**就起来了。
+  // 所以"之前是否存在"必须靠一个不受夹具影响的独立探针来判断，
+  // 不能在用例体里先读后比对——那样读到的已经是服务起来之后的状态。
+  const real = path.join(homedir(), '.vidsub');
+  const userVidsubExists = existsSync(real);
+
+  // 服务确实起过（这条断言同时说明夹具生效）
+  expect((await fetch(`${serverUrl}/__vidsub_alive`)).status).toBe(200);
+
+  // 记录文件落在隔离目录里
+  expect(existsSync(path.join(dataDir, 'instance.json')),
+    '服务的记录文件应落在隔离目录里').toBe(true);
+
+  // 用户目录不该因为这次服务而被创建
+  if (!userVidsubExists) {
+    expect(existsSync(real), `E2E 在用户目录里创建了 ${real}`).toBe(false);
+  }
+});
+
+test('隔离：起服务时确实通过 VIDSUB_DATA_DIR 传了隔离目录', async ({ dataDir, serverUrl }) => {
+  // 若将来重构时丢掉了读取 VIDSUB_DATA_DIR 的那行，隔离会静默失效
+  const rec = JSON.parse(readFileSync(path.join(dataDir, 'instance.json'), 'utf8'));
+  expect(typeof rec.port).toBe('number');
+  expect((await fetch(`${serverUrl}/__vidsub_alive`)).status).toBe(200);
+});

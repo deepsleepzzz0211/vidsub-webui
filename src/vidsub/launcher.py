@@ -65,13 +65,19 @@ def open_browser_after_ready(port: int, ready=None, timeout: float = 30.0):
 
     ready 是一个可选回调，在探测之前调用（用于让探测服务器真正开始 serve，
     测试里需要）。生产路径里 uvicorn 已经在另一个线程跑了，不需要它。
+
+    设了环境变量 VIDSUB_NO_BROWSER 则不打开浏览器 —— E2E 里每起一个服务就弹
+    一次窗口，既吵又可能让测试挂在真实浏览器上。
     """
     if ready is not None:
         ready()
 
     def _wait_and_open():
-        if wait_until_serving(port, timeout=timeout):
-            webbrowser.open(f"http://127.0.0.1:{port}/")
+        if not wait_until_serving(port, timeout=timeout):
+            return
+        if os.environ.get("VIDSUB_NO_BROWSER"):
+            return
+        webbrowser.open(f"http://127.0.0.1:{port}/")
 
     t = threading.Thread(target=_wait_and_open, daemon=True)
     t.start()

@@ -9,6 +9,7 @@
    ERR_CONNECTION_REFUSED。
 4. 记下端口，让下次启动能认出自己。
 """
+import os
 import sys
 import webbrowser
 
@@ -37,10 +38,11 @@ def main(argv=None) -> int:
         url = f"http://127.0.0.1:{existing}/"
         print(f"vidsub 已在运行：{url}")
         print("如需重启，请先关闭那个窗口。")
-        try:
-            webbrowser.open(url)
-        except Exception:
-            pass    # 打不开浏览器不算错误，URL 已打印
+        if not os.environ.get("VIDSUB_NO_BROWSER"):
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass    # 打不开浏览器不算错误，URL 已打印
         return 0
 
     # 2. 端口：指定了就用指定的并检查冲突，否则自动挑空闲

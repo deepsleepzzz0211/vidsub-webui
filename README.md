@@ -69,6 +69,44 @@ pip install -e ".[dev]"
 pytest
 ```
 
+### 端到端测试
+
+E2E 用 Node 版 Playwright（不是 Python 版），因为本机已有 Chromium 浏览器。
+
+```bash
+npm install          # 装 @playwright/test（CLI 不含这个 runner 包）
+npm run e2e          # 跑 E2E
+npm run typecheck    # TypeScript 类型检查
+```
+
+首次运行会自动获取测试素材（源文件 3.3 MB，裁剪后 1.3 MB），缓存在
+`.e2e-cache/`。**网络不通时会跳过并说明原因**；但**素材校验失败或 ffmpeg
+缺失属于环境故障，会让测试失败** —— 把损坏的素材当成"跳过"会变成一片绿，
+是最危险的一种失败。
+
+首次在新机器上跑需要 `npx playwright install chromium`（本机已装）。
+
+本机访问 Wikimedia 需要代理：
+
+```bash
+VIDSUB_FIXTURE_PROXY=http://127.0.0.1:7897 npm run e2e
+```
+
+E2E 在**临时目录**里起隔离实例，不读写你自己的 `~/.vidsub`，跑完自动清理。
+失败时保留 trace 与截图（`test-results/`），用 `npx playwright show-trace` 查看。
+
+只跑单元测试（不起服务、不占端口）：
+
+```bash
+pytest -m "not e2e_support"
+```
+
+测试素材是一段公有领域朗读音频（Wikimedia Commons，Booker T. Washington 1895
+年演说片段），裁到 2.5 分钟并合成画面。选它是因为**单人独白、无背景音乐**：
+实测背景音乐（−13 dB）比人声（−26 dB）还响，会让语音活动检测把音乐当成语音。
+构建时会强制校验语音占比（当前 37.5%，下限 30%），可用
+`python tools/check_fixture.py <文件>` 手动复验。
+
 ## 许可
 
 代码 MIT。模型权重许可见上方。
