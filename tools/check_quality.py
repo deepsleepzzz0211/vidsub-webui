@@ -169,7 +169,7 @@ def _neighbour_words(ops, idx: int, ref: list, ctx: int = 4) -> set:
     """
     words = set()
     if idx - 1 >= 0 and ops[idx - 1][0] == "equal":
-        _, i1, i2, _, _ = ops[idx - 1]
+        _, _, i2, _, _ = ops[idx - 1]
         words.update(ref[max(0, i2 - ctx):i2])
     if idx + 1 < len(ops) and ops[idx + 1][0] == "equal":
         _, i1, i2, _, _ = ops[idx + 1]
