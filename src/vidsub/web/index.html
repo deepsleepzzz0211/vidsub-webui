@@ -113,7 +113,22 @@ function renderJob(j) {
     ${j.state === 'running' ? `<div class="bar"><i style="width:${ratio * 100}%"></i></div>` : ''}
     ${j.state === 'failed' ? `<div class="errmsg">${(j.error || '').split('\n')[0]}</div>` : ''}
     ${j.state === 'done' ? `<a href="/api/jobs/${j.id}/srt" target="_blank">下载字幕</a>` : ''}
+    ${j.state === 'done' && j.burn_state !== 'done' ?
+      `<button onclick="burn('${j.id}')" ${j.burn_state === 'running' ? 'disabled' : ''}>${j.burn_state === 'failed' ? '重新压制' : '压制成片'}</button>` : ''}
+    ${j.burn_state === 'running' ? `<div class="state running">压制中…</div>` : ''}
+    ${j.burn_state === 'failed' ? `<div class="errmsg">${(j.error || '').split('\n')[0]}</div>` : ''}
+    ${j.burn_state === 'done' ? `<a href="/api/jobs/${j.id}/video" target="_blank">预览成片</a>` : ''}
   </div>`;
+}
+
+async function burn(jobId) {
+  const r = await fetch(`/api/jobs/${jobId}/burn`, { method: 'POST' });
+  const b = await r.json();
+  if (!r.ok) {
+    alert('压制失败：' + (b.error || r.statusText));
+    return;
+  }
+  poll();
 }
 
 $('drop').addEventListener('click', () => $('file').click());

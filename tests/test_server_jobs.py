@@ -179,5 +179,62 @@ def test_job_directory_has_no_spaces(client, monkeypatch):
     b = client.get("/api/jobs").json()["jobs"]
     jm = server.jobs()
     for j in b:
-        assert " " not in jm.get(j["id"])["srt"]
-        assert " " not in jm.get(j["id"])["video"]
+        jmj = jm.get(j["id"])
+        assert jmj is not None, f"job {j['id']} 在管理器里找不到"
+        assert " " not in jmj["srt"]
+        assert " " not in jmj["video"]
+
+
+# --- 压制成片（06） ---------------------------------------------------------
+
+def test_burn_endpoint_produces_playable_video(client, monkeypatch, tmp_path):
+    """POST /api/jobs/{id}/burn 起压制，完成后 video 接口能拿到成片"""
+    import subprocess
+    from vidsub import audio as _a
+
+    _seed_models()
+    _patch_pipeline(monkeypatch)
+
+    # 造一个带音轨的真视频
+    vp = os.path.join(str(tmp_path), "v.mp4")
+    r = subprocess.run([
+        _a.ffmpeg(), "-y", "-loglevel", "error", "-nostdin",
+        "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=15",
+        "-f", "lavfi", "-i", "sine=frequency=220:duration=1",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-shortest", vp], capture_output=True, text=True)
+    assert os.path.exists(vp), r.stderr
+
+    r = client.post("/api/jobs", files={"file": ("v.mp4", open(vp, "rb"), "video/mp4")})
+    assert r.status_code == 200, r.text
+    job_id = r.json()["id"]
+
+    # 等 SRT job 完成
+    import time
+    for _ in range(50):
+        if server.jobs().get(job_id)["state"] == "done":
+            break
+        time.sleep(0.1)
+    assert server.jobs().get(job_id)["state"] == "done"
+
+    r = client.post(f"/api/jobs/{job_id}/burn")
+    assert r.status_code == 200, r.text
+
+    for _ in range(100):
+        bs = server.jobs().get(job_id).get("burn_state")
+        if bs in ("done", "failed"):
+            break
+        time.sleep(0.2)
+    jm = server.jobs().get(job_id)
+    assert jm["burn_state"] == "done", jm.get("error")
+    assert os.path.exists(jm["video_mp4"])
+
+    vid = client.get(f"/api/jobs/{job_id}/video")
+    assert vid.status_code == 200
+
+
+def test_burn_endpoint_rejects_when_srt_not_ready(client):
+    """不存在的 job 不能压"""
+    r = client.post("/api/jobs/nonexistent/burn")
+    # start_burn 抛 JobError → 409
+    assert r.status_code == 409

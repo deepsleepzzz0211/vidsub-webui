@@ -20,6 +20,7 @@ import uuid
 from typing import Optional
 
 from . import audio, pipeline, vad
+from . import burn as burn_mod
 
 PENDING = "pending"
 RUNNING = "running"
@@ -99,6 +100,8 @@ class JobManager:
             "video": video,
             "srt": os.path.join(jdir, "out.srt"),
             "work_dir": os.path.join(jdir, "work"),
+            "burn_state": "",
+            "video_mp4": "",
         }
         self._persist(job)
         return job
@@ -167,3 +170,35 @@ class JobManager:
         finally:
             with self._lock:
                 self._running.discard(job_id)
+
+    # --- 压制 ---
+
+    def start_burn(self, job_id: str, mono: bool = False) -> dict:
+        """字幕完成后喊一声「压制成片」。幂等：已经有压制在跑就不重启。"""
+        job = self.get(job_id)
+        if not job:
+            raise JobError(f"job 不存在：{job_id}")
+        if job["state"] != DONE:
+            raise JobError("字幕还没生成，不能压")
+        if job.get("burn_state") == "running":
+            return job
+        self.update(job_id, burn_state="running", error="")
+        t = threading.Thread(target=self._burn, args=(job_id, mono), daemon=True,
+                             name=f"vidsub-burn-{job_id}")
+        t.start()
+        return self.get(job_id)
+
+    def _burn(self, job_id: str, mono: bool) -> None:
+        job = self.get(job_id)
+        if not job:
+            return
+        try:
+            out = os.path.join(os.path.dirname(job["srt"]), "subtitled.mp4")
+            burn_mod.burn(job["video"], job["srt"], out, mono=mono,
+                          stage_dir=job["work_dir"])
+            self.update(job_id, burn_state="done", video_mp4=out)
+        except burn_mod.BurnError as e:
+            self.update(job_id, burn_state="failed", error=str(e))
+        except Exception as e:  # noqa: BLE001
+            self.update(job_id, burn_state="failed",
+                        error=f"{type(e).__name__}: {e}")

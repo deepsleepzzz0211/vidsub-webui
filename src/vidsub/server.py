@@ -414,3 +414,24 @@ def get_srt(job_id: str):
                             status_code=409)
     return FileResponse(j["srt"], media_type="text/plain; charset=utf-8",
                         filename="subtitles.srt")
+
+
+@app.post("/api/jobs/{job_id}/burn")
+def burn_job(job_id: str, mono: bool = False):
+    """字幕完成后压制成片。后台跑，状态走 job['burn_state']。"""
+    try:
+        return jobs().start_burn(job_id, mono=mono)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=409)
+
+
+@app.get("/api/jobs/{job_id}/video")
+def get_video(job_id: str):
+    j = jobs().get(job_id)
+    if not j:
+        return JSONResponse({"error": "job 不存在"}, status_code=404)
+    if j.get("burn_state") != "done" or not j.get("video_mp4"):
+        return JSONResponse({"error": "成片还没准备好", "burn_state": j.get("burn_state")},
+                            status_code=409)
+    return FileResponse(j["video_mp4"], media_type="video/mp4",
+                        filename="subtitled.mp4")
