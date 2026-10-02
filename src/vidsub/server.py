@@ -13,12 +13,13 @@ import subprocess
 import sys
 import threading
 
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
-from . import discovery, downloader, launcher
+from . import audio, discovery, downloader, launcher
 from . import registry, runtime
 from .downloads import DownloadManager
+from .jobs import JobManager
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(HERE, "web")
@@ -124,6 +125,15 @@ def data_dir() -> str:
 _manager: DownloadManager | None = None
 _manager_root: str = ""
 _manager_lock = threading.Lock()
+_jobs: "JobManager | None" = None
+
+
+def jobs() -> JobManager:
+    global _jobs
+    if _jobs is None:
+        from .jobs import _jobs_root
+        _jobs = JobManager(_jobs_root())
+    return _jobs
 
 
 def manager() -> DownloadManager:
@@ -334,3 +344,73 @@ def runtime_log(key: str = "", tail: int = 60):
         return JSONResponse({"error": f"读不到日志：{e}"}, status_code=500)
     return {"key": key, "log_path": log_path,
             "log": "".join(lines[-max(tail, 1):])}
+
+
+# --- 上传处理与作业 -------------------------------------------------------
+
+@app.post("/api/jobs")
+async def create_job(file: UploadFile = File(...)):
+    """上传视频 → 探测它 → 建 job → 后台跑流水线。"""
+    m = manager()
+    if not m.all_ready():
+        return JSONResponse({"error": "模型还没齐全，先去下载页"}, status_code=409)
+    if not file.filename:
+        return JSONResponse({"error": "没有选择文件"}, status_code=400)
+    job = jobs().create(file.filename, file.size or 0, {})
+    try:
+        data = await file.read()
+    except Exception:
+        return JSONResponse({"error": "读取上传的文件失败"}, status_code=500)
+    with open(job["video"], "wb") as f:
+        f.write(data)
+    try:
+        info = audio.probe_media(job["video"])
+    except audio.MediaError as e:
+        jobs().update(job["id"], state="failed", error=str(e))
+        return JSONResponse({"error": str(e)}, status_code=422)
+    jobs().update(job["id"], info={
+        "duration": info.duration, "width": info.width, "height": info.height,
+        "size_bytes": info.size_bytes, "has_audio": info.has_audio,
+    })
+    if not info.has_audio:
+        jobs().update(job["id"], state="failed",
+                      error="这个文件没有音频轨，无法识别语音")
+        return JSONResponse({"error": "文件没有音频轨"}, status_code=422)
+    # 模型权重要已就绪，后台才能跑通
+    import threading as _t
+    _t.Thread(target=_ensure_runtime_then_start, args=(job["id"],), daemon=True).start()
+    return jobs().get(job["id"])
+
+
+def _ensure_runtime_then_start(job_id: str) -> None:
+    try:
+        rt().ensure_started(runtime.default_services())
+    except runtime.StartupError as e:
+        jobs().update(job_id, state="failed", error=str(e))
+        return
+    jobs().start(job_id)
+
+
+@app.get("/api/jobs")
+def list_jobs():
+    return {"jobs": jobs().list()}
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str):
+    j = jobs().get(job_id)
+    if not j:
+        return JSONResponse({"error": "job 不存在"}, status_code=404)
+    return j
+
+
+@app.get("/api/jobs/{job_id}/srt")
+def get_srt(job_id: str):
+    j = jobs().get(job_id)
+    if not j:
+        return JSONResponse({"error": "job 不存在"}, status_code=404)
+    if j["state"] != "done":
+        return JSONResponse({"error": "字幕还没做完", "state": j["state"]},
+                            status_code=409)
+    return FileResponse(j["srt"], media_type="text/plain; charset=utf-8",
+                        filename="subtitles.srt")
