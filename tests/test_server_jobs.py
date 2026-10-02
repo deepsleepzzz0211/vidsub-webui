@@ -17,7 +17,7 @@ import wave
 import pytest
 from fastapi.testclient import TestClient
 
-from vidsub import downloader, jobs, pipeline, registry, server
+from vidsub import jobs, registry, server
 
 
 def _fake_bytes(key="x") -> bytes:
