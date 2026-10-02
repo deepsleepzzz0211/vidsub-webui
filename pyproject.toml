@@ -34,4 +34,5 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
     "e2e_support: 需要起真实服务/端口的测试，普通单元测试用 -m 'not e2e_support' 跳过",
+    "no_fake_bin: 不注入 llama-server 替身，用来验「找不到可执行文件」这类路径",
 ]

@@ -17,7 +17,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from . import discovery, downloader, launcher
-from . import registry
+from . import registry, runtime
 from .downloads import DownloadManager
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -28,6 +28,8 @@ app = FastAPI(title="vidsub", docs_url=None, redoc_url=None)
 # 已登记的子进程 pid，退出时统一 terminate
 _CHILDREN: list[int] = []
 _CHILDREN_LOCK = threading.Lock()
+# 推理运行时（模块级单例，由 rt() 懒创建）
+_rt: "runtime.Runtime | None" = None
 
 
 def register_child(pid: int) -> None:
@@ -41,7 +43,14 @@ def _terminate_children() -> None:
 
     注意 capture_output=True 已经接管了 stdout/stderr，再传 stdout= 会直接
     抛 ValueError 而**静默被 except 吞掉** —— 清理形同虚设，进程照样残留。
+
+    推理服务由 runtime 自己管（它知道自己的 pid），这里只兜底收其它遗留。
     """
+    try:
+        if _rt is not None:
+            _rt.stop_all()
+    except Exception:
+        pass
     with _CHILDREN_LOCK:
         pids, _CHILDREN[:] = list(_CHILDREN), []
     for pid in pids:
@@ -229,3 +238,64 @@ def downloads_page():
     if os.path.exists(page):
         return FileResponse(page)
     return JSONResponse({"message": "下载页未就绪"})
+
+
+# --- 推理运行时 ---------------------------------------------------------
+#
+# 识别与翻译两个 llama-server 常驻复用，第一个作业结束后不退出。
+# 缺权重时不要贸然启动 —— 那必然失败，先让用户去下载页。
+
+def rt() -> runtime.Runtime:
+    """取全局唯一的运行时。按模型目录缓存（同 manager 的理由）。"""
+    global _rt, _rt_root
+    root = data_dir()
+    with _manager_lock:
+        if _rt is None or _rt_root != root:
+            if _rt is not None:
+                _rt.stop_all()
+            _rt = runtime.Runtime(
+                model_root=root,
+                idle_timeout=float(os.environ.get(runtime.IDLE_ENV, "1800")),
+            )
+            _rt_root = root
+        return _rt
+
+
+_rt_root = ""
+
+
+@app.get("/api/runtime")
+def runtime_status():
+    """推理服务现状：状态、端口、pid、日志位置"""
+    return {"services": rt().status()}
+
+
+@app.post("/api/runtime/start")
+def runtime_start():
+    """把两个推理服务拉起来。重复调用安全：已在跑的直接复用。"""
+    m = manager()
+    missing = [i["key"] for i in m.missing()]
+    if missing:
+        return JSONResponse(
+            {"error": "权重还没齐，先去下载页", "missing": missing},
+            status_code=409)
+    try:
+        services = rt().ensure_started(runtime.default_services())
+    except runtime.StartupError as e:
+        # 消息里已经带了日志尾巴与具体是哪个服务，直接透传给用户
+        return JSONResponse({"error": str(e)}, status_code=503)
+    return {"services": services}
+
+
+@app.post("/api/runtime/stop")
+def runtime_stop():
+    """手动关掉推理服务（释放内存）"""
+    rt().stop_all()
+    return {"services": rt().status()}
+
+
+@app.post("/api/runtime/touch")
+def runtime_touch():
+    """作业在跑，标记一下以推迟空闲退出"""
+    rt().touch()
+    return {"ok": True}
