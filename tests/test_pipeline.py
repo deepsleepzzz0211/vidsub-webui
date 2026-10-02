@@ -12,6 +12,7 @@
 import http.server
 import json
 import threading
+import time
 import wave
 
 import pytest
@@ -194,6 +195,74 @@ def test_full_run_is_deterministic(services, tmp_path, monkeypatch):
                  asr_url=asr.url, mt_url=mt.url)
     assert open(o1, encoding="utf-8").read() == open(o2, encoding="utf-8").read(), \
         "同输入两次运行应产出字节一致的 SRT（温度 0.0 的意义）"
+
+
+# --- 预计剩余时间（05 号票）-----------------------------------------------
+
+def test_eta_returns_minus_one_until_enough_samples():
+    """样本不足时不给数。
+
+    前一两段算出来的"平均耗时"纯属噪声，显示"还剩 3 秒"然后跳到
+    "还剩 40 分钟"比不显示更糟。前端约定负数 = 不显示。
+    """
+    t0 = time.monotonic()
+    assert pipeline._eta(t0, 0, 100) == -1.0
+    assert pipeline._eta(t0, 1, 100) == -1.0
+
+
+def test_eta_extrapolates_from_average():
+    """按**平均**段耗时外推：t0 在 10 秒前、已完成 10 段 → 每段 1 秒，
+    还剩 90 段就是 90 秒。
+
+    用瞬时速度算的话，一段长句（20 秒）后面紧跟一段 0.3 秒的，ETA 会在
+    "还剩 40 分钟"和"还剩 3 秒"之间来回跳。
+    """
+    t0 = time.monotonic() - 10.0
+    assert pipeline._eta(t0, 10, 100) == pytest.approx(90.0, abs=0.5)
+
+
+def test_eta_never_negative_when_finished():
+    """全部完成时是 0 而不是负数 —— 负数在前端是"样本不足"的哨兵值，
+    两者不能混。"""
+    t0 = time.monotonic() - 10.0
+    assert pipeline._eta(t0, 10, 10) == pytest.approx(0.0, abs=0.1)
+    assert pipeline._eta(t0, 12, 10) == pytest.approx(0.0, abs=0.1)
+
+
+def test_eta_without_total_returns_per_segment():
+    """不知道总数时给"每段多少秒"，由调用方决定怎么用"""
+    t0 = time.monotonic() - 10.0
+    assert pipeline._eta(t0, 10) == pytest.approx(1.0, abs=0.1)
+
+
+def test_progress_callback_receives_eta(services, tmp_path, monkeypatch):
+    """进度回调要把 eta 真的传出去 —— 前端显示的就是它。
+
+    光有 `_eta` 函数不算数：`run()` 忘了把它接进 progress 的话，
+    页面上永远看不到剩余时间，而单元测试还是会全绿。
+    """
+    video = _silent_wav(tmp_path, "in.mp4", 3.0)
+    out = str(tmp_path / "o.srt")
+    monkeypatch.setattr(pipeline.vad, "segments",
+                        lambda wav, **kw: [(0.0, 0.5), (0.5, 1.0), (1.0, 1.5)])
+    monkeypatch.setattr(pipeline.audio, "extract_audio",
+                        lambda video, wav: _silent_wav_at(wav, 3.0))
+    asr, mt = services
+
+    calls = []
+    pipeline.run(video, out, work_dir=str(tmp_path / "work"),
+                 asr_url=asr.url, mt_url=mt.url,
+                 progress=lambda *a, **kw: calls.append((a, kw)))
+
+    assert calls, "progress 一次都没被调用"
+    # 契约：progress(i, total, stage, translated, eta) —— eta 是第 5 个位置参数
+    assert all(len(a) == 5 for a, _ in calls), \
+        f"progress 的参数个数变了：{calls[0]}"
+    etas = [a[4] for a, _ in calls]
+    assert etas[0] == -1.0, "第一段没有样本，应给 -1（前端据此不显示）"
+    assert etas[-1] == pytest.approx(0.0, abs=0.5), \
+        "跑完时应归零 —— 负数在前端是「样本不足」的哨兵值，两者不能混"
+    assert any(e > 0 for e in etas), "整个过程里一次正数的剩余时间都没给过"
 
 
 def test_no_speech_raises_not_empty_srt(services, tmp_path, monkeypatch):

@@ -37,6 +37,11 @@
   .bar { height: 6px; border-radius: 99px; background: rgba(128,128,128,.25); margin-top: .5rem; overflow: hidden; }
   .bar > i { display: block; height: 100%; width: 0; background: currentColor; }
   .errmsg { color: var(--err); font-size: .85rem; margin-top: .3rem; white-space: pre-wrap; }
+  .player { margin-top: .7rem; }
+  .player video {
+    display: block; border-radius: 8px; background: #000; max-height: 24rem;
+  }
+  .player-links { display: flex; gap: 1rem; margin-top: .5rem; font-size: .88rem; flex-wrap: wrap; }
   .style { margin: 1.1rem 0; display: flex; align-items: center; gap: .55rem; font-size: .92rem; }
   .style select { font: inherit; padding: .35rem .5rem; border-radius: 8px; }
   .style .hint { opacity: .6; font-size: .82rem; }
@@ -110,9 +115,46 @@ async function poll() {
   try {
     const r = await fetch('/api/jobs');
     const jobs = (await r.json()).jobs || [];
-    $('jobs').innerHTML = jobs.length ? jobs.map(renderJob).join('')
+    const html = jobs.length ? jobs.map(renderJob).join('')
       : '<p style="opacity:.5">还没有作业</p>';
+    const box = $('jobs');
+    // 内容没变就别碰 DOM。**内嵌播放器之后这条必须有**：重建 innerHTML
+    // 会把正在播放的 <video> 换掉，播放从头开始 —— 用户正看着成片校对
+    // 字幕，每 1.2 秒被重置一次是不能接受的。
+    if (box.dataset.sig === html) return;
+    // 有播放器正在播（没暂停）时冻结渲染，只刷新状态区文本。
+    if (isPlaying() && box.dataset.sig) { updateLive(jobs); return; }
+    box.dataset.sig = html;
+    box.innerHTML = html;
   } catch (e) { /* 忽略轮询异常 */ }
+}
+
+function isPlaying() {
+  return Array.from(document.querySelectorAll('#jobs video'))
+    .some((v) => !v.paused && !v.ended && v.currentTime > 0);
+}
+
+// 播放期间只刷新文本，不动 <video> 节点
+function updateLive(jobs) {
+  for (const j of jobs) {
+    const row = document.getElementById('job-' + j.id);
+    if (!row) continue;
+    const st = row.querySelector('.state');
+    if (st && j.state) {
+      const p = j.progress || {};
+      st.textContent = ({done:'完成',failed:'失败',running:'处理中',pending:'排队中'})[j.state]
+        + ' · ' + (p.label || '');
+    }
+  }
+}
+
+// 剩余时间：只在前端格式化，后端只给秒数（负数 = 样本还不够，不显示）
+function etaText(p) {
+  if (p == null || p.eta == null || p.eta < 0) return '';
+  const s = Math.round(p.eta);
+  if (s < 60) return ` · 约剩 ${s} 秒`;
+  const m = Math.round(s / 60);
+  return ` · 约剩 ${m} 分钟`;
 }
 
 function renderJob(j) {
@@ -122,7 +164,7 @@ function renderJob(j) {
   return `<div class="job" id="job-${j.id}">
     <div class="row"><span class="name">${j.filename}</span>
       <span>${dur(j.info && j.info.duration)} · ${j.info && j.info.width ? j.info.width + '×' + j.info.height : ''}</span></div>
-    <div class="state ${j.state}">${stateMap[j.state] || j.state} · ${p.label || ''}</div>
+    <div class="state ${j.state}">${stateMap[j.state] || j.state} · ${p.label || ''}${p.translated ? ` · 已翻译 ${p.translated} 条` : ''}${etaText(p)}</div>
     ${j.state === 'running' ? `<div class="bar"><i style="width:${ratio * 100}%"></i></div>` : ''}
     ${j.state === 'failed' ? `<div class="errmsg">${(j.error || '').split('\n')[0]}</div>` : ''}
     ${j.state === 'done' ? `<a href="/api/jobs/${j.id}/srt" target="_blank">下载字幕</a>` : ''}
@@ -130,8 +172,24 @@ function renderJob(j) {
       `<button onclick="burn('${j.id}')" ${j.burn_state === 'running' ? 'disabled' : ''}>${j.burn_state === 'failed' ? '重新压制' : '压制成片'}</button>` : ''}
     ${j.burn_state === 'running' ? `<div class="state running">压制中…</div>` : ''}
     ${j.burn_state === 'failed' ? `<div class="errmsg">${(j.error || '').split('\n')[0]}</div>` : ''}
-    ${j.burn_state === 'done' ? `<a href="/api/jobs/${j.id}/video" target="_blank">预览成片</a>` : ''}
+    ${j.burn_state === 'done' ? player(j) : ''}
   </div>`;
+}
+
+// 内嵌播放器：12 号票要求"成片能直接在页面里播放"，不是只给一个外链。
+// controls 是必须的 —— 要能拖进度条、能静音，才算真的能"检查成片"。
+// preload="metadata"：只拉文件头拿到时长/分辨率，不预拉整个视频
+// （几十上百 MB 的成片全量预载会拖慢页面）。
+function player(j) {
+  const src = `/api/jobs/${j.id}/video`;
+  return `<div class="player">
+      <video controls preload="metadata" width="100%" src="${src}"></video>
+      <div class="player-links">
+        <a href="${src}" download>下载成片</a>
+        <a href="/api/jobs/${j.id}/srt" download>下载字幕</a>
+        <a href="${src}" target="_blank">新标签页打开</a>
+      </div>
+    </div>`;
 }
 
 // 已订阅的流，防止同一个作业开一堆 EventSource
@@ -157,9 +215,9 @@ function watchJob(jobId) {
       if (bar) bar.style.width = (ratio * 100) + '%';
       const st = row.querySelector('.state');
       if (st) {
-        const txt = p.label || '';
         const extra = p.translated ? ` · 已翻译 ${p.translated} 条` : '';
-        st.textContent = ({done:'完成',failed:'失败',running:'处理中',pending:'排队中'})[j.state] + ' · ' + txt + extra;
+        st.textContent = ({done:'完成',failed:'失败',running:'处理中',pending:'排队中'})[j.state]
+          + ' · ' + (p.label || '') + extra + etaText(p);
       }
       if (j.state === 'failed') {
         const e2 = row.querySelector('.errmsg');

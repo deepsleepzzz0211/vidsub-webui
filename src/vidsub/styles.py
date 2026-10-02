@@ -14,6 +14,17 @@ from __future__ import annotations
 MAX_ZH = 34
 MAX_WORDS = 18
 
+# 一条 cue 最多占几行（07 号票的硬要求：字幕不能盖住幻灯片正文）。
+#
+# 阈值不是拍的：burn.py 里 SIZE_BILINGUAL=19px 是在 45 秒片段上抽帧逐档试
+# 出来的（30px 占 5 行盖住正文、22px 字大且空、19px 4 行刚好）。按 19px、
+# 1920 宽、左右边距各 80px 反推，一行约放 45 个汉字或 90 个英文字符，
+# 于是 34 字中文 / 18 词英文都是**一行**，双语两条 = 2 行，留了 2 行余量。
+# 这个函数把那个反推写成可执行的断言，免得以后改字号时无声破功。
+MAX_LINES = 4
+CHARS_PER_LINE_ZH = 45
+CHARS_PER_LINE_EN = 90
+
 # 相邻两条字幕**整句相同**、间隔不超过 DUP_WINDOW 秒时，判为切分抖动并掐掉
 # 后一条。两个阈值缺一不可：
 #   DUP_WINDOW —— 说话人隔 10 秒说两遍 "yes" 是正常内容，不该删。
@@ -141,3 +152,22 @@ def _ts(sec: float) -> str:
     m = int((sec % 3600) // 60)
     s = sec % 60
     return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
+
+
+def est_lines(zh: str, en: str) -> int:
+    """估算一条 cue 在压制后占几行（中英各算，取和）。
+
+    用来验证 MAX_ZH / MAX_WORDS 与 burn.py 里的字号配套：字号变大或边距
+    变宽，行数就超了，这时候该调阈值而不是等成片出来才发现盖住正文。
+    """
+    n = 0
+    if zh:
+        n += -(-len(zh) // CHARS_PER_LINE_ZH)
+    if en:
+        n += -(-len(en) // CHARS_PER_LINE_EN)
+    return n
+
+
+def thresholds_fit(max_lines: int = MAX_LINES) -> bool:
+    """当前阈值下，一条 cue 最坏情况会不会超过 max_lines 行。"""
+    return est_lines("字" * MAX_ZH, "w" * (MAX_WORDS * 5)) <= max_lines

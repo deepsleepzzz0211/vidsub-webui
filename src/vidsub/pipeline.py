@@ -130,6 +130,23 @@ def write_srt(cues: list, path: str, mono: bool = False,
         f.write(body)
 
 
+def _eta(t0: float, done: int, total: Optional[int] = None) -> float:
+    """按已完成段的**平均**耗时估剩余秒数，取不到就返回 -1。
+
+    用平均而不是瞬时速度：单段耗时抖动很大（一段长句可能 20 秒，下一段
+    0.3 秒），瞬时速度算出的 ETA 会满屏跳。平均至少是单调收敛的。
+
+    前几段样本不足（done < 2）时不给数 —— 那时候的估计纯属噪声，
+    显示一个"还剩 3 秒"然后变成"还剩 40 分钟"比不给更糟。
+    """
+    if done < 2:
+        return -1.0
+    per = (time.monotonic() - t0) / done
+    if total is None:
+        return per
+    return max(0.0, per * (total - done))
+
+
 def run(video_path: str, out_srt: str,
         work_dir: Optional[str] = None,
         progress: Optional[Callable[..., None]] = None,
@@ -170,16 +187,17 @@ def run(video_path: str, out_srt: str,
 
     stage(f"识别并翻译（共 {len(segs)} 段）")
     cues = []
+    t0 = time.monotonic()
     for i, (a, b) in enumerate(segs):
         if progress:
-            progress(i, len(segs), "识别并翻译", i)
+            progress(i, len(segs), "识别并翻译", i, _eta(t0, i, len(segs)))
         part = os.path.join(work_dir, f"seg_{i:04d}.wav")
         audio.slice_wav(wav, part, a, b - a)
         _, src = transcribe(part, asr_url=asr_url)
         dst = translate(src, target=target, mt_url=mt_url)
         cues.append((a, b, src, dst))
         if progress:
-            progress(i + 1, len(segs), "识别并翻译", i + 1)
+            progress(i + 1, len(segs), "识别并翻译", i + 1, _eta(t0, i + 1, len(segs)))
 
     stage("写出字幕")
     write_srt(cues, out_srt, mono=mono)

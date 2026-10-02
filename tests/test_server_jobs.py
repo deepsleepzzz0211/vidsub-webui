@@ -17,7 +17,7 @@ import wave
 import pytest
 from fastapi.testclient import TestClient
 
-from vidsub import jobs, registry, server
+from vidsub import jobs, pipeline, registry, server
 
 
 def _fake_bytes(key="x") -> bytes:
@@ -312,6 +312,40 @@ def test_intermediates_cleaned_after_success(client, monkeypatch):
     # 产物必须还在
     assert os.path.isfile(jm["srt"]), "字幕被误删了"
     assert os.path.isfile(jm["video"]), "上传的源视频被误删了"
+
+
+def test_done_is_published_only_after_cleanup(client, monkeypatch):
+    """发布 `done` 的那一刻，清理必须已经完成。
+
+    `done` 是给外界的完成信号：页面轮询、SSE、E2E 断言看到它就会去读工作区。
+    先发布再清理会留下一个窗口 —— 全量测试里真撞上过：轮询到 done 立刻断言
+    中间品已删，而清理还没跑完。症状是**单独跑通过、全量跑失败**，最难查的
+    那一类 flaky。
+
+    所以这里不看"清理有没有发生"，而看**它发生的时候作业是什么状态**。
+    """
+    _seed_models()
+    _patch_pipeline(monkeypatch)
+
+    seen = []
+    real = jobs.JobManager._clean_work
+
+    def _spy(self, job_id):
+        jm = self.get(job_id)
+        seen.append(jm["state"] if jm else None)
+        return real(self, job_id)
+
+    monkeypatch.setattr(jobs.JobManager, "_clean_work", _spy)
+
+    job = client.post("/api/jobs",
+                      files={"file": ("a.wav", _wav_bytes(), "audio/wav")}).json()
+    jm = _wait_state(job["id"], "done")
+    assert jm["state"] == "done", jm["error"]
+
+    assert seen, "清理根本没被调用"
+    assert all(s != "done" for s in seen), (
+        f"清理被调用时作业已经是 done 了（状态序列 {seen}）—— "
+        f"客户端会在这个窗口里读到没清干净的工作区")
 
 
 def test_intermediates_kept_after_failure(client, monkeypatch):

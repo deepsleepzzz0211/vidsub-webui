@@ -91,9 +91,27 @@ def _common_args() -> list:
     -t 8          8 线程已是最优：4→8 几乎无变化，说明受内存带宽限制
     --parallel 1  单并发；我们要串行推理，开大只会抢页锁
     --load-mode mlock  锁住权重防换页
+
+    --no-cache-prompt  **必须关掉，这是可复现性的前提**。
+
+    llama-server 默认开启 prompt 缓存：同一进程内的第二个请求会复用上一请求
+    的 KV 前缀，于是**批处理路径不同 → 浮点累加顺序不同 → 偶尔 argmax 落在
+    另一个 token 上**。表现是同一输入重复翻译给出不同译文，而 temperature
+    已经是 0.0（贪心）—— 所以这不是采样随机性，关温度修不好它。
+
+    实测对照（同一 prompt 重复 5 次）：
+      - 缓存开启：2 种输出（不稳定）
+      - -t 1    ：仍然 2 种（所以**不是**多线程归约的问题）
+      - -s 0    ：仍然 2 种（也**不是**随机种子的问题）
+      - --no-cache-prompt：1 种 ✅
+      - 跨进程重启：两种配置都稳定（每次都是完整 prefill）
+
+    代价可忽略：翻译的 prompt 只有几十个 token；识别的 prompt 每次音频都不同，
+    本来也命中不了缓存。
     """
     return ["-ngl", "0", "-t", "8", "--parallel", "1",
-            "--load-mode", "mlock", "-fa", "auto", "--prio", "2"]
+            "--load-mode", "mlock", "-fa", "auto", "--prio", "2",
+            "--no-cache-prompt"]
 
 
 def default_services() -> list:

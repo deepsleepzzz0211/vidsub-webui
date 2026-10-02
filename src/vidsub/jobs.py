@@ -203,13 +203,18 @@ class JobManager:
                 on_stage=lambda label: self.update(
                     job_id, progress={"i": 0, "total": 0, "label": label}),
             )
-            self.update(job_id, state=DONE,
-                        progress={"i": 1, "total": 1, "label": "完成"})
             # 中间品删掉，产物（out.srt / subtitled.mp4 / input）留着。
             # 12 号票要求"素材用完即清理"：70 分钟视频会切出几百个
             # seg_*.wav，加上整条 audio.wav，能吃掉几个 GB。08 号票要求
             # "产物不自动删" —— 两者不冲突，因为删的只是中间品。
+            #
+            # ⚠️ 清理必须在**发布 DONE 之前**。DONE 是给外界的完成信号，
+            # 页面轮询 / SSE / E2E 断言看到它就会去读工作区；反过来写会留下
+            # 一个"已宣告完成、其实还没清干净"的窗口。全量测试里真撞上过，
+            # 症状是**单独跑通过、全量跑失败**的 flaky。
             self._clean_work(job_id)
+            self.update(job_id, state=DONE,
+                        progress={"i": 1, "total": 1, "label": "完成"})
         except (audio.MediaError, vad.NoSpeechError,
                 pipeline.PipelineError) as e:
             self.update(job_id, state=FAILED, error=str(e),
@@ -253,12 +258,14 @@ class JobManager:
 
     def _progress_cb(self, job_id: str):
         """段落进度：写状态 + 顺手 touch 一次（引用计数之外的第二道保险）。"""
-        def _cb(i: int, total: int, stage: str = "", translated: int = 0):
+        def _cb(i: int, total: int, stage: str = "", translated: int = 0,
+                eta: float = -1.0):
             if self.get(job_id):
                 label = stage or f"识别中 {i}/{total}"
                 self.update(job_id, progress={"i": i, "total": total,
                                               "label": label,
-                                              "translated": translated})
+                                              "translated": translated,
+                                              "eta": eta})
                 try:
                     from . import server as server_mod
                     server_mod.rt().touch()
@@ -289,11 +296,12 @@ class JobManager:
             job = self.get(job_id)
             if not job:
                 return
+            out = os.path.join(os.path.dirname(job["srt"]), "subtitled.mp4")
+            ok = False
             try:
-                out = os.path.join(os.path.dirname(job["srt"]), "subtitled.mp4")
                 burn_mod.burn(job["video"], job["srt"], out, mono=mono,
                               stage_dir=job["work_dir"])
-                self.update(job_id, burn_state="done", video_mp4=out)
+                ok = True
             except burn_mod.BurnError as e:
                 self.update(job_id, burn_state="failed", error=str(e))
             except Exception as e:  # noqa: BLE001
@@ -302,4 +310,10 @@ class JobManager:
             finally:
                 # burn 会把源视频和字幕复制进暂存目录再跑 ffmpeg，跑完就是
                 # 两份几百 MB 的垃圾。同样只清中间品，成片留着。
+                #
+                # 与 _run 同理：清理要在**发布终态之前**完成，否则客户端
+                # 会在"已宣告完成"的窗口里读到没清干净的工作区。放在
+                # finally 里是为了失败路径也清（幂等，成功路径上面不清）。
                 self._clean_work(job_id)
+            if ok:
+                self.update(job_id, burn_state="done", video_mp4=out)

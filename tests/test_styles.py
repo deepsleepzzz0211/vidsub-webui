@@ -5,11 +5,17 @@
 - 拆分只改时间分配，不改文字
 - 09 号票要求的全局不变量：时间轴零倒退、零重叠、零重复
 """
+import os
 import re
 
 from vidsub import styles
 
+_INDEX_HTML = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "src", "vidsub", "web", "index.html")
+
 _TS = re.compile(r"^(\d+):(\d+):(\d+),(\d+)$")
+CJK = re.compile(r"[一-鿿]")
 
 
 def _parse(srt: str) -> list:
@@ -85,6 +91,81 @@ def test_format_skips_empty():
 
 def test_ts_format():
     assert styles._ts(3723.5) == "01:02:03,500"
+
+
+# --- 07：单条字幕不能盖住画面中部 ------------------------------------------
+
+def test_worst_case_cue_fits_max_lines():
+    """一条 cue 最坏情况也不能超过 4 行。
+
+    MAX_ZH/MAX_WORDS 与 burn.py 的 SIZE_BILINGUAL=19px 是配套的。改了
+    字号或边距却不调阈值，成片就会盖住幻灯片正文 —— 这条把它钉住。
+    """
+    assert styles.thresholds_fit(), (
+        f"最坏情况 {styles.est_lines('字' * styles.MAX_ZH, 'w' * styles.MAX_WORDS * 5)}"
+        f" 行，超过上限 {styles.MAX_LINES}；该调 MAX_ZH/MAX_WORDS 或确认字号")
+
+
+def test_every_rendered_cue_fits_max_lines():
+    """实际渲染出来的每一条都要在行数预算内，不只是最坏情况。"""
+    cues = []
+    for i in range(120):
+        # 故意混进长短不一的句子：有的刚好一行，有的顶到阈值
+        en = " ".join(f"w{i}_{j}" for j in range(1 + i % 25))
+        zh = f"第{i}句" + "内容" * (i % 20)
+        cues.append((i * 3.0, i * 3.0 + 2.8, en, zh))
+    srt = styles.format_srt(cues)
+    for start, end, lines in _parse(srt):
+        zh = "".join(l for l in lines if CJK.search(l))
+        en = " ".join(l for l in lines if not CJK.search(l))
+        n = styles.est_lines(zh, en)
+        assert n <= styles.MAX_LINES, f"这条占了 {n} 行：{lines}"
+
+
+def test_long_sentence_gets_split_not_overflowed():
+    """超长句子必须被拆开，而不是原样塞进一条 cue。"""
+    en = " ".join(["word"] * 120)
+    zh = "很长的中文句子" * 40
+    srt = styles.format_srt([(0.0, 10.0, en, zh)])
+    cues = _parse(srt)
+    assert len(cues) > 1, "超长句子没被拆"
+    for _, _, lines in cues:
+        zh_i = "".join(l for l in lines if CJK.search(l))
+        en_i = " ".join(l for l in lines if not CJK.search(l))
+        assert styles.est_lines(zh_i, en_i) <= styles.MAX_LINES
+
+
+def test_style_params_not_exposed_to_user():
+    """字号/边距不出现在任何 API 或页面上。
+
+    07 号票明确要求"样式参数不暴露给用户随意调整" —— 调出压屏效果的
+    组合太多（字号 × 边距 × 行距），让用户自己调等于把 bug 现场交给用户。
+    样式只有 bilingual / mono 两个预设。
+    """
+    import inspect
+    from vidsub import server
+
+    # 压制端点只认 mono 这一个开关，没有字号/边距/行距参数
+    sig = inspect.signature(server.burn_job)
+    assert set(sig.parameters) == {"job_id", "mono"}, sig.parameters
+
+    # 页面不出现 ASS 字幕样式里的可调项。
+    # 注意只查 ASS 关键字，不查 CSS 的 font-size —— 页面自身的排版当然
+    # 有 font-size，那不是"暴露字幕样式参数"。
+    html = open(_INDEX_HTML, encoding="utf-8").read()
+    for leak in ("FontSize", "FontName", "MarginV", "MarginL",
+                 "OutlineColour", "LineSpacing", "Alignment"):
+        assert leak not in html, f"页面暴露了字幕样式参数：{leak}"
+
+    # 页面上的样式控件只有两个固定选项，没有数字输入框
+    assert '<option value="bilingual"' in html
+    assert '<option value="mono"' in html
+    assert 'type="number"' not in html, "页面有数字输入框，用户能自定义样式"
+    assert 'type="range"' not in html, "页面有滑块，用户能自定义样式"
+
+    # 样式只有两档（styles.format_srt 认的）
+    assert styles.format_srt([(0, 1, "a", "甲")], style="bilingual")
+    assert styles.format_srt([(0, 1, "a", "甲")], style="mono")
 
 
 # --- 09 号票：全局时间轴不变量 ---------------------------------------------

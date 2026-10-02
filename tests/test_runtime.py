@@ -483,6 +483,24 @@ def test_default_services_match_verified_pipeline():
     assert "1024" in mt.extra, "翻译上下文应 1024（实测值）"
 
 
+def test_prompt_cache_is_disabled_for_reproducibility():
+    """`--no-cache-prompt` 必须在，这是"同一输入跑两次结果一致"的前提。
+
+    llama-server 默认开 prompt 缓存：同一进程内第二个请求复用上一请求的 KV
+    前缀，批处理路径就变了，浮点累加顺序跟着变，偶尔 argmax 会落在另一个
+    token 上。症状是同一段文本重复翻译给出不同译文 —— 而 temperature 已经
+    是 0.0，所以关温度、减线程、固定种子都修不好它。
+
+    实测对照：缓存开启 → 2 种输出；-t 1 → 仍 2 种；-s 0 → 仍 2 种；
+    --no-cache-prompt → 1 种。跨进程重启本来稳定（每次都是完整 prefill），
+    所以这条只在**服务被复用**时才暴露 —— 而那正是本项目的常态。
+    """
+    args = runtime._common_args()
+    assert "--no-cache-prompt" in args, (
+        "关掉 prompt 缓存才能保证可复现性；去掉它会让同一视频跑两次产出"
+        "不同的字幕（译文层），而英文转写层看不出问题")
+
+
 def test_services_use_distinct_ports():
     ports = [s.port for s in runtime.default_services()]
     assert len(ports) == len(set(ports)), f"两个服务端口撞了：{ports}"
