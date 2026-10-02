@@ -89,6 +89,12 @@ async function stopTree(proc: ChildProcess): Promise<void> {
  */
 export const test = base.extend<Fixtures>({
   dataDir: async ({}, use) => {
+    // 设了 VIDSUB_DATA_DIR 就用它（真模型 E2E 用），否则临时目录隔离
+    const given = process.env.VIDSUB_DATA_DIR;
+    if (given) {
+      await use(given);
+      return;
+    }
     const dir = mkdtempSync(path.join(tmpdir(), 'vidsub-e2e-'));
     try {
       await use(dir);
@@ -114,6 +120,9 @@ export const test = base.extend<Fixtures>({
         env: {
           ...process.env,
           VIDSUB_DATA_DIR: dataDir,
+          // 真模型 E2E：沿用调用方指定的真实权重目录与 llama-server
+          ...(process.env.VIDSUB_LLAMA_SERVER
+            ? { VIDSUB_LLAMA_SERVER: process.env.VIDSUB_LLAMA_SERVER } : {}),
           // 把缓存根也隔离，避免读到开发者机器上的真实权重
           HF_HOME: path.join(dataDir, 'hf'),
           HF_HUB_CACHE: path.join(dataDir, 'hf', 'hub'),
