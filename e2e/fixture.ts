@@ -1,9 +1,28 @@
 import { test as base, expect } from '@playwright/test';
-import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, existsSync } from 'node:fs';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, existsSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+
+/**
+ * 跑一个外部命令，返回 stdout。
+ *
+ * 用**异步** execFile 而不是 execFileSync，两个理由：
+ * 1. 同步版会阻塞 Playwright 的事件循环 —— 阻塞期间页面的网络事件、超时
+ *    计时器、轮询全都停摆。用例里虽然都是短命令，但没有理由去阻塞。
+ * 2. 本机环境里同步 spawn **一律返回 EBUSY**（连 `node -v` 都是，sandbox
+ *    内外一样），异步 spawn 正常。实测：`spawnSync('ffprobe', ...)` →
+ *    `EBUSY`；同样命令走异步 execFile → 正常输出。
+ */
+export function runTool(bin: string, args: string[],
+                       opts: { cwd?: string } = {}): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(bin, args,
+             { encoding: 'utf8', cwd: opts.cwd, maxBuffer: 16 * 1024 * 1024 },
+             (err, stdout) => (err ? reject(err) : resolve(String(stdout))));
+  });
+}
 
 const ROOT = path.resolve(__dirname, '..');
 const PROBE = '/__vidsub_alive';
@@ -127,6 +146,34 @@ export const test = base.extend<Fixtures>({
   // 真模型用例自己写 test.use({ withModels: true })。
   withModels: [false, { option: true }],
 
+  /**
+   * 用例失败时保存现场（11 号票：不是只给个断言失败）。
+   *
+   * 光有 `expect` 失败信息定位不了真问题 —— 真模型链路的失败往往在
+   * 页面上（进度停在哪、有没有报错、作业状态是什么），而断言消息里只有
+   * 一个期望值。所以失败时额外落一份页面状态 + 作业 JSON + 截图。
+   *
+   * 成功时不留任何东西，test-results 不会单调堆积。
+   */
+  page: async ({ page }, use, testInfo) => {
+    await use(page);
+    if (testInfo.status !== testInfo.expectedStatus) {
+      const dir = testInfo.outputDir;
+      mkdirSync(dir, { recursive: true });
+      try {
+        writeFileSync(path.join(dir, 'page.html'), await page.content(), 'utf8');
+        writeFileSync(
+          path.join(dir, 'page-state.json'),
+          JSON.stringify(await collectState(page), null, 2),
+          'utf8',
+        );
+        await page.screenshot({ path: path.join(dir, 'final.png'), fullPage: true });
+      } catch {
+        /* 现场收集失败不能盖掉原本的失败原因 */
+      }
+    }
+  },
+
   dataDir: async ({ withModels }, use) => {
     const dir = mkdtempSync(path.join(tmpdir(), 'vidsub-e2e-'));
     try {
@@ -216,9 +263,82 @@ export const test = base.extend<Fixtures>({
     try {
       await use(url);
     } finally {
+      // 记下服务自己看到的 llama-server pid：夹具结束后要确认这些
+      // 推理进程真的没了。llama-server 自己还会 fork，Windows 上 detached
+      // 起的进程不随父进程退出，留下来就是几个 GB 的白占内存。
+      const pids = await llamaServerPids(url);
       await stopTree(proc);
+      if (pids.length) await assertNoLlamaServers(pids);
     }
   },
 });
+
+/** 从服务的 runtime 状态里拿 llama-server 的 pid。 */
+async function llamaServerPids(base: string): Promise<number[]> {
+  try {
+    const r = await fetch(`${base}/api/runtime`, { signal: AbortSignal.timeout(5000) });
+    if (!r.ok) return [];
+    const j = await r.json();
+    const services = (j.services || j) as { pid?: number | null }[];
+    return services.map((s) => s.pid).filter((p): p is number => !!p);
+  } catch {
+    return [];   // 服务没起来就没什么可回收的
+  }
+}
+
+/** 确认这些 pid 都已消失。残留会白占几 GB 内存，必须当失败报出来。 */
+async function assertNoLlamaServers(pids: number[]): Promise<void> {
+  const deadline = Date.now() + 20_000;
+  let alive: number[] = [];
+  while (Date.now() < deadline) {
+    const flags = await Promise.all(pids.map(isAlive));
+    alive = pids.filter((_, i) => flags[i]);
+    if (!alive.length) return;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(
+    `服务退出后仍有推理进程存活：pid ${alive.join(', ')}。\n` +
+    `  这是 03 号票的硬要求（不留残余进程），每个 llama-server 占几 GB。`,
+  );
+}
+
+/** 失败现场：页面文本 + 作业状态 + 运行时状态。都是排障时第一眼要看的。 */
+async function collectState(page: any) {
+  const out: Record<string, unknown> = {};
+  try { out.title = await page.title(); } catch { /* ignore */ }
+  try { out.url = page.url(); } catch { /* ignore */ }
+  try { out.bodyText = (await page.locator('body').innerText()).slice(0, 4000); } catch { /* ignore */ }
+  const base = page.url().replace(/\/$/, '');
+  for (const [name, ep] of [
+    ['jobs', '/api/jobs'],
+    ['models', '/api/models'],
+    ['runtime', '/api/runtime'],
+  ] as const) {
+    try {
+      const r = await page.request.get(base + ep);
+      out[name] = await r.json();
+    } catch (e) {
+      out[name] = { error: String(e) };
+    }
+  }
+  return out;
+}
+
+async function isAlive(pid: number): Promise<boolean> {
+  if (process.platform !== 'win32') {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    const out = await runTool('tasklist', ['/FI', `PID eq ${pid}`, '/NH']);
+    return out.includes(String(pid)) && !/no tasks/i.test(out);
+  } catch {
+    return false;
+  }
+}
 
 export { expect };

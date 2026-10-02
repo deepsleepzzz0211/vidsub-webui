@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { spawnSync } from 'node:child_process';
+import { runTool } from './fixture';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -21,11 +21,14 @@ const SOURCE = path.join(CACHE, 'source.mp3');
  * 把后者也当成跳过，等于让"素材已损坏"变成一片绿，是最危险的一种失败。
  */
 
-function runFixtureScript(): { ok: boolean; out: string; err: string } {
-  const r = spawnSync('python', ['tools/fixture.py'], {
-    cwd: ROOT, encoding: 'utf8', timeout: 300_000,
-  });
-  return { ok: r.status === 0, out: r.stdout || '', err: r.stderr || '' };
+async function runFixtureScript(): Promise<{ ok: boolean; out: string }> {
+  try {
+    const out = await runTool('python', ['tools/fixture.py'], { cwd: ROOT });
+    return { ok: true, out };
+  } catch (e) {
+    const err = e as { stdout?: string; stderr?: string; message?: string };
+    return { ok: false, out: `${err.stdout || ''}\n${err.stderr || err.message || ''}` };
+  }
 }
 
 /** 只把"连不上网络"当作可跳过 */
@@ -34,16 +37,16 @@ function isNetworkProblem(msg: string): boolean {
     .test(msg) && !/sha256|校验|期望|实际/.test(msg);
 }
 
-test('素材：真实公开视频已就位', () => {
+test('素材：真实公开视频已就位', async () => {
   if (!existsSync(FIXTURE)) {
-    const { ok, out, err } = runFixtureScript();
+    const { ok, out } = await runFixtureScript();
     if (!ok) {
-      if (isNetworkProblem(err + out)) {
+      if (isNetworkProblem(out)) {
         test.skip(true, `素材无法下载（网络不通），跳过。注意：本机需设 VIDSUB_FIXTURE_PROXY`);
         return;
       }
       // 校验失败、ffmpeg 缺失等属于环境故障，必须暴露而不是藏起来
-      throw new Error(`素材准备失败（不是网络问题，属环境故障）：\n${out}\n${err}`);
+      throw new Error(`素材准备失败（不是网络问题，属环境故障）：\n${out}`);
     }
   }
   expect(existsSync(FIXTURE), '素材文件不存在').toBe(true);
@@ -62,7 +65,7 @@ test('素材：源文件 sha256 与锁定值一致', () => {
   expect(got.toUpperCase()).toBe((m as RegExpMatchArray)[1].toUpperCase());
 });
 
-test('素材：确实是视频、带音频轨、时长符合声明', () => {
+test('素材：确实是视频、带音频轨、时长符合声明', async () => {
   if (!existsSync(FIXTURE)) {
     test.skip(true, '素材尚未生成');
     return;
@@ -71,14 +74,11 @@ test('素材：确实是视频、带音频轨、时长符合声明', () => {
   const expectSec = Number(
     (py.match(/TRIM_SECONDS\s*=\s*(\d+)/) as RegExpMatchArray)[1]);
 
-  const probe = spawnSync('ffprobe', [
+  const stdout = await runTool('ffprobe', [
     '-v', 'error', '-show_entries', 'stream=codec_type,duration',
     '-show_entries', 'format=duration', '-of', 'json', FIXTURE,
-  ], { encoding: 'utf8', timeout: 30_000 });
-  if (probe.status !== 0) {
-    throw new Error(`ffprobe 不可用或素材损坏：${probe.stderr}`);
-  }
-  const info = JSON.parse(probe.stdout);
+  ]);
+  const info = JSON.parse(stdout);
   const streams = info.streams || [];
   expect(streams.map((s: any) => s.codec_type)).toContain('video');
   expect(streams.map((s: any) => s.codec_type)).toContain('audio');

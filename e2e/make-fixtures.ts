@@ -11,9 +11,10 @@
  * 幂等：已存在就跳过（.e2e-cache 是缓存目录，不该每次跑都重新转码）。
  * 用 `-c copy` 不重编码，秒级完成。
  */
-import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
+
+import { runTool } from './fixture';
 
 const CACHE = path.resolve(__dirname, '..', '.e2e-cache');
 const SRC = path.join(CACHE, 'fixture.mp4');
@@ -35,13 +36,13 @@ let made = 0;
 for (const [name, seconds] of CLIPS) {
   const out = path.join(CACHE, name);
   if (existsSync(out)) continue;
-  execFileSync('ffmpeg', [
+  await runTool('ffmpeg', [
     '-v', 'error', '-y',
     '-i', SRC,
     '-t', String(seconds),
     '-c', 'copy',
     out,
-  ], { stdio: 'inherit' });
+  ]);
   console.log(`已生成：${name}（${seconds}s）`);
   made++;
 }

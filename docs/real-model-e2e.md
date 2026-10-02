@@ -24,6 +24,36 @@ $env:VIDSUB_E2E_FIXTURE_SHORTER=(Resolve-Path .e2e-cache\fixture-8s.mp4).Path
 npx tsx e2e\make-fixtures.ts
 ```
 
+## ⚠️ 先确认 `python` 指向装了 vidsub 的那个解释器
+
+E2E 夹具用**裸 `python`** 起服务（`spawn('python', ['-m', 'vidsub', ...])`）。
+如果 PATH 里排在前面的是别的解释器，**40 条用例会全部快速失败**，报：
+
+```
+服务在超时内没就绪（端口 61613）。
+  退出码: 1
+  stderr: ...python.exe: No module named vidsub
+```
+
+症状很有迷惑性：连"下载页列出四个权重"这种不碰模型的用例也一起失败，
+看起来像代码坏了，其实只是解释器选错了。
+
+本机 WorkBuddy 托管的 3.13 排在 PATH 前面且没装 vidsub，而 vidsub 是
+editable 装在系统 3.11 里的。跑之前把 3.11 提到最前：
+
+```bash
+PATH="/c/Users/wzx/AppData/Local/Programs/Python/Python311:$PATH" \
+  npx playwright test --workers=1
+```
+
+自检一条命令：
+
+```bash
+python -c "import vidsub; print(vidsub.__file__)"
+```
+
+打印不出来就先修 PATH，别急着跑用例。
+
 ## 跑
 
 ```powershell

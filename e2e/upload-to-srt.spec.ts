@@ -101,3 +101,39 @@ test('字幕预览在页面上按中文在上呈现', async ({ page, serverUrl }
   await expect(page.locator('#jobs a[href*="/srt"]').first()).toBeVisible();
   await expect(page.locator('.job .state.done').first()).toContainText('完成');
 });
+
+test('同一个视频跑两次，字幕字节级一致', async ({ page, serverUrl }) => {
+  // 可复现性必须在**真实链路上**成立才作数：温度 0.0 保证的是同一次
+  // 加载的模型给出同样的输出，但服务复用/重新加载、线程调度、浮点归约
+  // 都可能引入差异。这条用两次独立的完整作业来验。
+  //
+  // ⚠️ 两次作业的**文件名相同**，所以不能靠 filename 找作业 —— 那样两次
+  // 会拿到同一个。改成先记下已有 id 集合，再找"新出现的那个"。
+  const runOnce = async (): Promise<string> => {
+    const before = new Set(
+      ((await (await page.request.get(`${serverUrl}/api/jobs`)).json()).jobs || [])
+        .map((j: any) => j.id));
+
+    await page.goto(serverUrl);
+    await page.locator('#file').setInputFiles(FIXTURE);
+    await expect(page.locator('#meta')).toContainText('时长');
+
+    let id = '';
+    await expect(async () => {
+      const jobs = (await (await page.request.get(`${serverUrl}/api/jobs`)).json()).jobs || [];
+      const mine = jobs.find((j: any) => !before.has(j.id));
+      expect(mine, '新作业还没建出来').toBeTruthy();
+      id = mine.id;
+      expect(mine.state, mine.error || '还没跑完').toBe('done');
+    }).toPass({ timeout: 30 * 60 * 1000, intervals: [3000] });
+
+    return (await page.request.get(`${serverUrl}/api/jobs/${id}/srt`)).text();
+  };
+
+  const a = await runOnce();
+  const b = await runOnce();
+
+  expect(a.length).toBeGreaterThan(0);
+  expect(Buffer.from(a, 'utf8').equals(Buffer.from(b, 'utf8')),
+    '两次跑的字幕不一致，可复现性在真实链路上不成立').toBe(true);
+});
