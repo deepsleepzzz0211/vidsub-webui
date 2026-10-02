@@ -28,8 +28,6 @@ app = FastAPI(title="vidsub", docs_url=None, redoc_url=None)
 # 已登记的子进程 pid，退出时统一 terminate
 _CHILDREN: list[int] = []
 _CHILDREN_LOCK = threading.Lock()
-# 推理运行时（模块级单例，由 rt() 懒创建）
-_rt: "runtime.Runtime | None" = None
 
 
 def register_child(pid: int) -> None:
@@ -253,22 +251,29 @@ def downloads_page():
 # 缺权重时不要贸然启动 —— 那必然失败，先让用户去下载页。
 
 def rt() -> runtime.Runtime:
-    """取全局唯一的运行时。按模型目录缓存（同 manager 的理由）。"""
+    """取全局唯一的运行时。按模型目录缓存（同 manager 的理由）。
+
+    用独立的 Runtime 锁而不是复用 _manager_lock：stop_all 要花秒级去杀
+    进程，拿着下载管理器那把锁做这事会让所有下载状态查询一起卡住。
+    """
     global _rt, _rt_root
     root = data_dir()
-    with _manager_lock:
+    with _rt_lock:
         if _rt is None or _rt_root != root:
-            if _rt is not None:
-                _rt.stop_all()
+            old = _rt
             _rt = runtime.Runtime(
                 model_root=root,
                 idle_timeout=float(os.environ.get(runtime.IDLE_ENV, "1800")),
             )
             _rt_root = root
+            if old is not None:
+                old.stop_all()
         return _rt
 
 
+_rt: "runtime.Runtime | None" = None
 _rt_root = ""
+_rt_lock = threading.Lock()
 
 
 @app.get("/api/runtime")
@@ -306,3 +311,26 @@ def runtime_touch():
     """作业在跑，标记一下以推迟空闲退出"""
     rt().touch()
     return {"ok": True}
+
+
+@app.get("/api/runtime/log")
+def runtime_log(key: str = "", tail: int = 60):
+    """查看某个推理服务的日志尾巴。
+
+    没有它，日志落盘就形同虚设：起不来时错误里带一截，真起来之后出
+    问题却没地方看。key 传服务名；不传默认看 asr。
+    """
+    key = key or "asr"
+    services = {s["key"]: s for s in rt().status()}
+    if key not in services:
+        return JSONResponse({"error": f"未知服务 {key}"}, status_code=404)
+    log_path = services[key]["log_path"]
+    if not os.path.isfile(log_path):
+        return JSONResponse({"key": key, "log": "（日志文件还不存在）"})
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError as e:
+        return JSONResponse({"error": f"读不到日志：{e}"}, status_code=500)
+    return {"key": key, "log_path": log_path,
+            "log": "".join(lines[-max(tail, 1):])}

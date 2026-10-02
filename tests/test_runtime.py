@@ -211,9 +211,11 @@ def test_log_tail_included_in_error(rt, monkeypatch):
 
 
 def test_log_path_has_no_spaces(rt, models):
-    """日志路径含空格会让排查时命令难用"""
-    for s in rt.status() or []:
-        assert " " not in s["log_path"]
+    """日志路径含空格会让排查时命令难用 —— 启动一个服务再验真实产物"""
+    rt.ensure_started([_spec("asr", _free_port(), A_GGUF)])
+    st = rt.status()
+    assert len(st) == 1, "上面启动失败，日志路径没落地"
+    assert " " not in st[0]["log_path"]
 
 
 # --- 失败与超时 ---------------------------------------------------------
@@ -227,21 +229,20 @@ def test_detects_process_exit_immediately(rt, monkeypatch):
     assert time.time() - t0 < 15, "进程早退了却等了很久才报错"
 
 
-def test_reports_timeout_without_hanging_forever(models, tmp_path):
+def test_reports_timeout_without_hanging_forever(models, tmp_path, monkeypatch):
     """hang 的进程必须超时上报，不能无限等"""
-    os.environ["FAKE_FAIL"] = "hang"
+    monkeypatch.setenv("FAKE_FAIL", "hang")
+    r = runtime.Runtime(model_root=models,
+                        bin_argv=[sys.executable, FAKE],
+                        log_dir=str(tmp_path / "logs2"),
+                        startup_timeout=2.0, idle_timeout=0.0)
+    t0 = time.time()
     try:
-        r = runtime.Runtime(model_root=models,
-                            bin_argv=[sys.executable, FAKE],
-                            log_dir=str(tmp_path / "logs2"),
-                            startup_timeout=2.0, idle_timeout=0.0)
-        t0 = time.time()
         with pytest.raises(runtime.StartupError) as ei:
             r.ensure_started([_spec("asr", _free_port(), A_GGUF)])
         assert time.time() - t0 < 12, "超时没生效"
         assert "超时" in str(ei.value) or "timeout" in str(ei.value).lower()
     finally:
-        os.environ.pop("FAKE_FAIL", None)
         r.stop_all()
 
 
@@ -253,7 +254,7 @@ def test_missing_model_file_is_reported_clearly(models, tmp_path):
     try:
         with pytest.raises(runtime.StartupError) as ei:
             r.ensure_started([_spec("asr", _free_port(), "r2t2/nope.gguf")])
-        assert "nope.gguf" in str(ei.value)
+        assert "nope.gguf" in str(ei.value), f"错误没指向出事的模型路径：{ei.value}"
     finally:
         r.stop_all()
 

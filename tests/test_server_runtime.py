@@ -240,8 +240,40 @@ def test_start_after_stop_works(client):
 
 # --- 空闲推迟 -----------------------------------------------------------
 
-def test_touch_defers_idle_shutdown(client):
+def test_touch_endpoint_marks_activity(client):
+    """touch 是一个「作业正在跑」的心跳：成功即返回 ok。
+
+    真正推迟空闲回收的行为由 tests/test_runtime.py 里的空闲巡检用例覆盖。
+    """
     _seed_models()
     client.post("/api/runtime/start")
     r = client.post("/api/runtime/touch")
     assert r.status_code == 200 and r.json()["ok"] is True
+
+
+# --- 日志可查看 ---------------------------------------------------------
+
+def test_log_endpoint_returns_tail(client):
+    """服务跑起来之后，日志必须可从接口取到 —— 否则日志落盘形同虚设"""
+    _seed_models()
+    client.post("/api/runtime/start")
+    r = client.get("/api/runtime/log", params={"key": "asr"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["key"] == "asr"
+    assert "listening" in body["log"] or "server" in body["log"], \
+        f"日志里没有启动痕迹：{body['log'][:200]}"
+
+
+def test_log_endpoint_rejects_unknown_service(client):
+    r = client.get("/api/runtime/log", params={"key": "nope"})
+    assert r.status_code == 404
+
+
+def test_log_endpoint_mentions_tail_limit(client):
+    _seed_models()
+    client.post("/api/runtime/start")
+    r = client.get("/api/runtime/log", params={"key": "asr", "tail": 5})
+    assert r.status_code == 200
+    lines = [l for l in r.json()["log"].splitlines() if l.strip()]
+    assert len(lines) <= 5, f"tail=5 却返回了 {len(lines)} 行"

@@ -76,52 +76,58 @@ def main() -> int:
     t0 = time.time()
     try:
         services = rt.ensure_started(runtime.default_services())
+        print(f"  两个服务就绪，耗时 {time.time() - t0:.1f}s")
+        for s in services:
+            print(f"  {s['key']:4} :{s['port']}  pid {s['pid']}  "
+                  f"{s['state']}  {s['model']}")
     except runtime.StartupError as e:
         print(f"  ✗ {e}")
-        return 1
-    print(f"  两个服务就绪，耗时 {time.time() - t0:.1f}s")
-    for s in services:
-        print(f"  {s['key']:4} :{s['port']}  pid {s['pid']}  "
-              f"{s['state']}  {s['model']}")
-
-    print()
-    print("=== 3. 复用（第二个作业不该重新加载）===")
-    t0 = time.time()
-    again = rt.ensure_started(runtime.default_services())
-    same = all(a["pid"] == b["pid"] for a, b in zip(services, again))
-    print(f"  复用耗时 {time.time() - t0:.2f}s，pid 未变：{same}")
-    if not same:
-        print("  ✗ 服务被重启了 —— 没达到常驻复用的目的")
+        # 部分失败时已起来的进程不能留着 —— 否则真二进制白占着内存
         rt.stop_all()
         return 1
 
-    print()
-    print("=== 4. 日志确实落盘 ===")
-    for s in services:
-        size = os.path.getsize(s["log_path"])
-        tail = runtime.tail(s["log_path"], n=2)
-        print(f"  {s['key']:4} {human(size):>10}  {s['log_path']}")
-        for line in tail.splitlines():
-            print(f"       {line[:110]}")
+    try:
+        print()
+        print("=== 3. 复用（第二个作业不该重新加载）===")
+        t0 = time.time()
+        again = rt.ensure_started(runtime.default_services())
+        same = all(a["pid"] == b["pid"] for a, b in zip(services, again))
+        print(f"  复用耗时 {time.time() - t0:.2f}s，pid 未变：{same}")
+        if not same:
+            print("  ✗ 服务被重启了 —— 没达到常驻复用的目的")
+            return 1
 
-    print()
-    print("=== 5. 退出清理（不留残余进程）===")
-    pids = [s["pid"] for s in services]
-    rt.stop_all()
-    for pid in pids:
-        deadline = time.time() + 20
-        while time.time() < deadline and runtime.alive(pid):
-            time.sleep(0.2)
-        state = "仍在" if runtime.alive(pid) else "已回收"
-        flag = "✗" if runtime.alive(pid) else "✓"
-        print(f"  {flag} pid {pid} {state}")
+        print()
+        print("=== 4. 日志确实落盘 ===")
+        for s in services:
+            size = os.path.getsize(s["log_path"])
+            tail_ = runtime.tail(s["log_path"], n=2)
+            print(f"  {s['key']:4} {human(size):>10}  {s['log_path']}")
+            for line in tail_.splitlines():
+                print(f"       {line[:110]}")
 
-    left = [p for p in pids if runtime.alive(p)]
-    print()
-    if left:
-        print(f"有 {len(left)} 个进程残留。")
-        return 1
-    print("全部回收干净，内存已归还。")
+        print()
+        print("=== 5. 退出清理（不留残余进程）===")
+        pids = [s["pid"] for s in services]
+        rt.stop_all()
+        for pid in pids:
+            deadline = time.time() + 20
+            while time.time() < deadline and runtime.alive(pid):
+                time.sleep(0.2)
+            state = "仍在" if runtime.alive(pid) else "已回收"
+            flag = "✗" if runtime.alive(pid) else "✓"
+            print(f"  {flag} pid {pid} {state}")
+
+        left = [p for p in pids if runtime.alive(p)]
+        print()
+        if left:
+            print(f"有 {len(left)} 个进程残留。")
+            return 1
+        print("全部回收干净，内存已归还。")
+    finally:
+        # 兜底：不论上面怎么走，都要收进程。
+        # 部分失败时已起来的进程不能留着 —— 否则真二进制白占着内存。
+        rt.stop_all()
     return 0
 
 

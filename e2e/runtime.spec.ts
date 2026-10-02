@@ -38,10 +38,9 @@ test('标记活跃不报错', async ({ request, serverUrl }) => {
   expect((await r.json()).ok).toBe(true);
 });
 
-test('两个服务定义与清单一致（接口直接暴露出来）', async ({ request, serverUrl }) => {
-  // 缺权重时 start 会被拒，但从服务定义能看出端口与模型路径是对的
-  const r = await request.post(`${serverUrl}/api/runtime/start`);
+test('缺权重时返回的清单涵盖识别/翻译/VAD（与 registry 相符）', async ({ request, serverUrl }) => {
+  const r = await request.get(`${serverUrl}/api/models`);
   const body = await r.json();
-  expect(body.missing.sort()).toEqual(
+  expect(body.missing.map((m: { key: string }) => m.key).sort()).toEqual(
     ['asr_mmproj', 'asr_model', 'mt_model', 'vad']);
 });
