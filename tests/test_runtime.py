@@ -550,6 +550,64 @@ def test_binary_name_is_platform_appropriate(tmp_path):
     assert runtime.find_llama_server(bin_dir=str(d))
 
 
+# --- 引用计数（08 号票）---------------------------------------------------
+
+def test_holder_blocks_idle_reap(models, tmp_path):
+    """有作业持有服务时，空闲巡检不许回收 —— 哪怕早就超过 idle_timeout。
+
+    09 号票的作业要跑 20 分钟量级，光靠"每段打一次 touch"是不够的：
+    某一段推理卡住没人打点，模型就会被杀掉，作业后半程连不上。
+    """
+    r = runtime.Runtime(model_root=models, bin_argv=[sys.executable, FAKE],
+                        log_dir=str(tmp_path / "logs20"),
+                        startup_timeout=15.0, idle_timeout=1.0)
+    spec = _spec("asr", _free_port(), A_GGUF)
+    st = r.ensure_started([spec])
+    pid = st[0]["pid"]
+    try:
+        r.acquire()
+        assert r.holders == 1
+        time.sleep(2.5)          # 远超 idle_timeout=1.0
+        assert r.reap_idle() == [], "有持有者却把服务回收了"
+        assert _alive(pid), "正在用的服务被空闲巡检杀了"
+    finally:
+        r.release()
+        assert r.holders == 0
+        r.stop_all()
+
+
+def test_release_allows_reap_again(models, tmp_path):
+    """释放之后空闲回收要恢复工作，否则引用计数会把服务永久钉住。"""
+    r = runtime.Runtime(model_root=models, bin_argv=[sys.executable, FAKE],
+                        log_dir=str(tmp_path / "logs21"),
+                        startup_timeout=15.0, idle_timeout=1.0)
+    spec = _spec("asr", _free_port(), A_GGUF)
+    pid = r.ensure_started([spec])[0]["pid"]
+    try:
+        r.acquire()
+        assert r.reap_idle() == []
+        r.release()
+        time.sleep(2.0)
+        deadline = time.time() + 15
+        while time.time() < deadline and _alive(pid):
+            r.reap_idle()
+            time.sleep(0.3)
+        assert not _alive(pid), "释放持有者之后仍然不回收"
+    finally:
+        r.stop_all()
+
+
+def test_release_never_goes_negative(models, tmp_path):
+    """多释放不该把计数变成负数（否则会提前放行回收）。"""
+    r = runtime.Runtime(model_root=models, bin_argv=[sys.executable, FAKE],
+                        log_dir=str(tmp_path / "logs22"),
+                        startup_timeout=15.0, idle_timeout=60.0)
+    r.release()
+    r.release()
+    assert r.holders == 0
+    r.stop_all()
+
+
 # --- 辅助 ---------------------------------------------------------------
 
 def _alive(pid: int) -> bool:

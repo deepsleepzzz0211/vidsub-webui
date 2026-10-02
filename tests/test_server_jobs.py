@@ -77,9 +77,16 @@ def client():
 
 
 def _patch_pipeline(monkeypatch):
-    def _fake_run(video, out_srt, work_dir=None, progress=None, **kw):
+    def _fake_run(video, out_srt, work_dir=None, progress=None,
+                  on_stage=None, **kw):
+        if on_stage:
+            on_stage("抽取音轨")
+            on_stage("切分语音")
         if progress:
-            progress(1, 1)
+            progress(1, 3, "识别并翻译", 1)
+            progress(3, 3, "识别并翻译", 3)
+        if on_stage:
+            on_stage("写出字幕")
         os.makedirs(os.path.dirname(out_srt), exist_ok=True)
         with open(out_srt, "w", encoding="utf-8") as f:
             f.write("1\n00:00:00,000 --> 00:00:01,000\n你好\nhello\n\n")
@@ -90,6 +97,16 @@ def _patch_pipeline(monkeypatch):
     monkeypatch.setattr("vidsub.server._ensure_runtime_then_start",
                         lambda job_id: jobs.JobManager().start(job_id)
                         if False else _start_directly(job_id))
+
+
+def _wait_state(job_id: str, want: str, timeout: float = 5.0) -> dict:
+    import time
+    deadline = time.time() + timeout
+    jm = server.jobs().get(job_id)
+    while time.time() < deadline and jm and jm["state"] != want:
+        time.sleep(0.05)
+        jm = server.jobs().get(job_id)
+    return jm
 
 
 def _start_directly(job_id):
@@ -185,7 +202,190 @@ def test_job_directory_has_no_spaces(client, monkeypatch):
         assert " " not in jmj["video"]
 
 
+# --- 分阶段进度（05）--------------------------------------------------------
+
+def test_progress_carries_translated_count(client, monkeypatch):
+    """进度里要带「已翻译 N 条」这个计数，页面才能显示它（05）。"""
+    seen: list = []
+
+    def _fake_run(video, out_srt, work_dir=None, progress=None,
+                  on_stage=None, **kw):
+        if on_stage:
+            on_stage("抽取音轨")
+            on_stage("切分语音")
+        if progress:
+            progress(2, 5, "识别并翻译", 2)
+        os.makedirs(os.path.dirname(out_srt), exist_ok=True)
+        with open(out_srt, "w", encoding="utf-8") as f:
+            f.write("1\n00:00:00,000 --> 00:00:01,000\n你好\nhello\n\n")
+        return out_srt
+
+    monkeypatch.setattr(jobs.pipeline, "run", _fake_run)
+    monkeypatch.setattr("vidsub.server._ensure_runtime_then_start",
+                        _start_directly)
+
+    stages: list = []
+    real_update = jobs.JobManager.update
+
+    def _spy(self, job_id, **fields):
+        p = fields.get("progress")
+        if p:
+            if p.get("translated"):
+                seen.append(p["translated"])
+            if p.get("label"):
+                stages.append(p["label"])
+        return real_update(self, job_id, **fields)
+
+    monkeypatch.setattr(jobs.JobManager, "update", _spy)
+
+    _seed_models()
+    job = client.post("/api/jobs",
+                      files={"file": ("a.wav", _wav_bytes(), "audio/wav")}).json()
+    jm = _wait_state(job["id"], "done")
+    assert jm["state"] == "done", jm["error"]
+    assert seen, "进度里没有 translated 计数，页面显示不了「已翻译 N 条」"
+    # 大阶段（抽音轨/切分）必须出现，否则长视频前几分钟看着像卡死
+    assert any("抽取音轨" in s for s in stages), stages
+    assert any("切分语音" in s for s in stages), stages
+
+
+def test_job_holds_runtime_reference_while_running(client, monkeypatch):
+    """作业跑着的时候必须持有 runtime 引用计数（08）。
+
+    否则 09 号票那种 20 分钟的作业，会被空闲巡检在跑到一半时把模型
+    杀掉，后半程直接连不上推理服务。
+    """
+    _seed_models()
+    _patch_pipeline(monkeypatch)
+
+    import vidsub.runtime as rt_mod
+    seen: list = []
+    real_acquire = rt_mod.Runtime.acquire
+    real_release = rt_mod.Runtime.release
+
+    monkeypatch.setattr(rt_mod.Runtime, "acquire",
+                        lambda self: (seen.append("acquire"),
+                                      real_acquire(self))[1])
+    monkeypatch.setattr(rt_mod.Runtime, "release",
+                        lambda self: (seen.append("release"),
+                                      real_release(self))[1])
+
+    job = client.post("/api/jobs",
+                      files={"file": ("a.wav", _wav_bytes(), "audio/wav")}).json()
+    jm = _wait_state(job["id"], "done")
+    assert jm["state"] == "done", jm["error"]
+    assert "acquire" in seen, "作业运行时没有登记引用计数"
+    assert "release" in seen, "作业结束没有释放引用计数（服务会被永久钉住）"
+
+
+def test_intermediates_cleaned_after_success(client, monkeypatch):
+    """成功后中间品要清掉，产物要留着。
+
+    12 号票要求"素材用完即清理，不占满磁盘"（70 分钟视频会切几百个
+    seg_*.wav）；08 号票要求"产物不自动删"。删中间品、留产物，两者同时满足。
+    """
+    _seed_models()
+
+    def _fake_run(video, out_srt, work_dir=None, progress=None,
+                  on_stage=None, **kw):
+        os.makedirs(work_dir, exist_ok=True)
+        for name in ("audio.wav", "seg_0000.wav", "seg_0001.wav"):
+            with open(os.path.join(work_dir, name), "wb") as f:
+                f.write(b"x" * 32)
+        os.makedirs(os.path.dirname(out_srt), exist_ok=True)
+        with open(out_srt, "w", encoding="utf-8") as f:
+            f.write("1\n00:00:00,000 --> 00:00:01,000\n你好\nhello\n\n")
+        return out_srt
+
+    monkeypatch.setattr(jobs.pipeline, "run", _fake_run)
+    monkeypatch.setattr("vidsub.server._ensure_runtime_then_start",
+                        _start_directly)
+
+    job = client.post("/api/jobs",
+                      files={"file": ("a.wav", _wav_bytes(), "audio/wav")}).json()
+    jm = _wait_state(job["id"], "done")
+    assert jm["state"] == "done", jm["error"]
+
+    work = jm["work_dir"]
+    assert not os.path.exists(os.path.join(work, "audio.wav")), "audio.wav 没清掉"
+    assert not os.path.exists(os.path.join(work, "seg_0000.wav")), "seg_*.wav 没清掉"
+    # 产物必须还在
+    assert os.path.isfile(jm["srt"]), "字幕被误删了"
+    assert os.path.isfile(jm["video"]), "上传的源视频被误删了"
+
+
+def test_intermediates_kept_after_failure(client, monkeypatch):
+    """失败的作业要留下中间品 —— 那是排查现场。"""
+    _seed_models()
+
+    def _boom(video, out_srt, work_dir=None, progress=None,
+              on_stage=None, **kw):
+        os.makedirs(work_dir, exist_ok=True)
+        with open(os.path.join(work_dir, "audio.wav"), "wb") as f:
+            f.write(b"x" * 32)
+        raise pipeline.PipelineError("推理服务超时")
+
+    monkeypatch.setattr(jobs.pipeline, "run", _boom)
+    monkeypatch.setattr("vidsub.server._ensure_runtime_then_start",
+                        _start_directly)
+
+    job = client.post("/api/jobs",
+                      files={"file": ("a.wav", _wav_bytes(), "audio/wav")}).json()
+    jm = _wait_state(job["id"], "failed")
+    assert jm["state"] == "failed"
+    assert os.path.isfile(os.path.join(jm["work_dir"], "audio.wav")), \
+        "失败的作业把现场清掉了，没法排查"
+
+
 # --- 压制成片（06） ---------------------------------------------------------
+
+def test_burn_stage_files_cleaned_but_output_kept(client, monkeypatch, tmp_path):
+    """压制完，暂存目录里的 in.*/sub*.srt 要清掉，成片要留着。
+
+    burn 会把源视频和字幕复制进暂存目录再跑 ffmpeg —— 70 分钟视频那就是
+    两份几百 MB 的复制品。不清就等于每个作业白占一份源视频大小。
+    """
+    import subprocess
+    from vidsub import audio as _a
+
+    _seed_models()
+    _patch_pipeline(monkeypatch)
+
+    src = tmp_path / "src.mp4"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+         "-i", "testsrc=duration=2:size=320x240:rate=10",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+         "-shortest", str(src)],
+        check=True, capture_output=True)
+
+    job = client.post("/api/jobs", files={
+        "file": ("src.mp4", src.read_bytes(), "video/mp4")}).json()
+    jm = _wait_state(job["id"], "done", timeout=20.0)
+    assert jm["state"] == "done", jm["error"]
+
+    r = client.post(f"/api/jobs/{job['id']}/burn")
+    assert r.status_code == 200, r.text
+
+    import time
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        cur = server.jobs().get(job["id"])
+        if cur["burn_state"] in ("done", "failed"):
+            break
+        time.sleep(0.3)
+    cur = server.jobs().get(job["id"])
+    assert cur["burn_state"] == "done", cur.get("error")
+
+    work = cur["work_dir"]
+    leftovers = [n for n in os.listdir(work)
+                 if n == "audio.wav" or n.startswith(("seg_", "in.", "sub.srt",
+                                                     "sub_zh.srt"))]
+    assert leftovers == [], f"暂存目录还留着中间品：{leftovers}"
+    assert os.path.isfile(cur["video_mp4"]), "成片被误删了"
+    assert _a.has_audio(cur["video_mp4"]), "成片没有音轨"
+
 
 def test_burn_endpoint_produces_playable_video(client, monkeypatch, tmp_path):
     """POST /api/jobs/{id}/burn 起压制，完成后 video 接口能拿到成片"""

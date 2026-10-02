@@ -27,6 +27,10 @@ RUNNING = "running"
 DONE = "done"
 FAILED = "failed"
 
+# job.json 是热点文件：SSE 每秒读、页面每 1.2 秒读、worker 每段写。
+# Windows 上 os.replace 撞上别人的读句柄会 PermissionError，重试即可。
+_PERSIST_RETRIES = 8
+
 
 class JobError(RuntimeError):
     def __init__(self, error: str):
@@ -61,7 +65,8 @@ class JobManager:
         if not os.path.isfile(path):
             return None
         try:
-            return json.load(open(path, encoding="utf-8"))
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
         except (json.JSONDecodeError, OSError):
             return None
 
@@ -75,12 +80,27 @@ class JobManager:
         return out
 
     def _persist(self, job: dict) -> None:
+        """原子落盘：先写 .tmp 再 os.replace，读者永远看不到半个 JSON。
+
+        Windows 上 os.replace 会因为**别的线程正开着 job.json 读**而报
+        PermissionError（默认不共享 delete 权限）。job.json 是热点文件 ——
+        SSE 每秒读一次、页面每 1.2 秒轮询一次、worker 每段写一次，三方
+        撞上就失败。所以要重试，而不是把读者全锁起来（那会把轮询堵死）。
+        """
         jdir = os.path.join(self.root, job["id"])
         os.makedirs(jdir, exist_ok=True)
         tmp = os.path.join(jdir, "job.json.tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(job, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, os.path.join(jdir, "job.json"))
+        dest = os.path.join(jdir, "job.json")
+        for attempt in range(_PERSIST_RETRIES):
+            try:
+                os.replace(tmp, dest)
+                return
+            except PermissionError:
+                if attempt == _PERSIST_RETRIES - 1:
+                    raise
+                time.sleep(0.02 * (attempt + 1))
 
     # --- 创建 ------------------------------------------------------------
 
@@ -160,25 +180,36 @@ class JobManager:
                     self._running.discard(job_id)
 
     def _run(self, job_id: str) -> None:
-        """真正跑一个 job（只在 worker 里被调用）。"""
+        """真正跑一个 job（只在 worker 里被调用）。
+
+        全程持有 runtime 引用计数：作业跑多久（09 号票是 20 分钟量级）
+        都不会被空闲巡检回收模型 —— 不用靠"每段打一次 touch"的侥幸。
+        """
         job = self.get(job_id)
         if not job:
             return
         self.update(job_id, state=RUNNING, progress={"i": 0, "total": 0,
                                                       "label": "解析视频"})
+        # 延迟导入：server 顶层 import 了 jobs，顶层再 import 回去就成环。
+        # 单例 rt() 住在 server 里（它和 manager 共用同一套目录切换逻辑）。
+        from . import server as server_mod
+        rt = server_mod.rt()
+        rt.acquire()
         try:
-            def _progress(i: int, total: int):
-                if self.get(job_id):
-                    self.update(job_id, progress={"i": i, "total": total,
-                                                   "label": f"识别中 {i}/{total}"})
-
             pipeline.run(
                 job["video"], job["srt"],
                 work_dir=job["work_dir"],
-                progress=_progress,
+                progress=self._progress_cb(job_id),
+                on_stage=lambda label: self.update(
+                    job_id, progress={"i": 0, "total": 0, "label": label}),
             )
             self.update(job_id, state=DONE,
                         progress={"i": 1, "total": 1, "label": "完成"})
+            # 中间品删掉，产物（out.srt / subtitled.mp4 / input）留着。
+            # 12 号票要求"素材用完即清理"：70 分钟视频会切出几百个
+            # seg_*.wav，加上整条 audio.wav，能吃掉几个 GB。08 号票要求
+            # "产物不自动删" —— 两者不冲突，因为删的只是中间品。
+            self._clean_work(job_id)
         except (audio.MediaError, vad.NoSpeechError,
                 pipeline.PipelineError) as e:
             self.update(job_id, state=FAILED, error=str(e),
@@ -186,6 +217,54 @@ class JobManager:
         except Exception as e:  # noqa: BLE001
             self.update(job_id, state=FAILED, error=f"{type(e).__name__}: {e}",
                         progress={"i": 0, "total": 0, "label": "失败"})
+        finally:
+            rt.release()
+
+    # 暂存目录里的中间品文件名。audio.wav/seg_* 来自流水线，in.*/sub*.srt
+    # 来自压制（burn 会把源和字幕复制进去再跑 ffmpeg，跑完就是两份几百 MB
+    # 的垃圾）。产物 out.srt / subtitled.mp4 / input.* 都不在列。
+    _WORK_JUNK = ("audio.wav", "seg_", "in.", "sub.srt", "sub_zh.srt")
+
+    def _clean_work(self, job_id: str) -> int:
+        """删掉中间品（音频切片、压制暂存），保留产物。返回删掉的文件数。
+
+        失败时静默跳过：清理是锦上添花，不该让一个已经成功的作业变成失败。
+        作业失败时**不删** —— 中间品是排查"为什么这段识别不出来"的现场。
+        """
+        job = self.get(job_id)
+        if not job:
+            return 0
+        work = job.get("work_dir") or ""
+        if not work or not os.path.isdir(work):
+            return 0
+        n = 0
+        try:
+            for name in os.listdir(work):
+                if any(name == p or name.startswith(p)
+                       for p in self._WORK_JUNK):
+                    try:
+                        os.remove(os.path.join(work, name))
+                        n += 1
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return n
+
+    def _progress_cb(self, job_id: str):
+        """段落进度：写状态 + 顺手 touch 一次（引用计数之外的第二道保险）。"""
+        def _cb(i: int, total: int, stage: str = "", translated: int = 0):
+            if self.get(job_id):
+                label = stage or f"识别中 {i}/{total}"
+                self.update(job_id, progress={"i": i, "total": total,
+                                              "label": label,
+                                              "translated": translated})
+                try:
+                    from . import server as server_mod
+                    server_mod.rt().touch()
+                except Exception:      # noqa: BLE001
+                    pass               # 状态已经落盘，touch 失败不该弄坏作业
+        return _cb
 
     # --- 压制 ---
 
@@ -220,3 +299,7 @@ class JobManager:
             except Exception as e:  # noqa: BLE001
                 self.update(job_id, burn_state="failed",
                             error=f"{type(e).__name__}: {e}")
+            finally:
+                # burn 会把源视频和字幕复制进暂存目录再跑 ffmpeg，跑完就是
+                # 两份几百 MB 的垃圾。同样只清中间品，成片留着。
+                self._clean_work(job_id)

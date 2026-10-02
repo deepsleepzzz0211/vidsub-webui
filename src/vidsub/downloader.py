@@ -82,13 +82,9 @@ def _use_proxy(url: str) -> bool:
     host = _host_of(url).lower()
     if not host:
         return False
-    if _direct_failed_hosts() and host in _direct_failed:
+    if host in _direct_failed:
         return True
     return any(host == h or host.endswith("." + h) for h in _proxy_hosts())
-
-
-def _direct_failed_hosts() -> bool:
-    return bool(_direct_failed)
 
 
 def _raw_open(url: str, start: int, use_proxy: bool):
@@ -255,7 +251,7 @@ def _drop_sidecar(spec: AssetSpec) -> None:
     _silent_remove(_sidecar(spec.dest))
 
 
-def _request(url: str, start: int = 0, timeout: int = 60):
+def _request(url: str, start: int = 0):
     """兼容旧调用点。选路逻辑在 _open 里。"""
     return _open(url, start)
 

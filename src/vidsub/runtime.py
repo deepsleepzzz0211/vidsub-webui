@@ -206,6 +206,7 @@ class Runtime:
         self._lock = threading.RLock()
         self._stopping = False
         self._reaper: Optional[threading.Thread] = None
+        self._holders = 0
 
     # --- 参数拼装 --------------------------------------------------------
 
@@ -371,6 +372,28 @@ class Runtime:
             "idle_timeout": idle,
         }
 
+    def acquire(self) -> None:
+        """登记一个"正在用"的持有者（08：作业在跑时服务不许被回收）。
+
+        单靠 touch() 不够 —— 09 号票的作业要跑 20 分钟，touch 只在进度
+        回调里打点；万一某一段推理卡住 40 分钟没人打点，空闲巡检照样会把
+        正在用的模型杀掉，作业后半程直接连不上。引用计数是硬保证：
+        计数不为 0，reap_idle 就不动手。
+        """
+        with self._lock:
+            self._holders += 1
+            for run in self._services.values():
+                if run.state == STATE_READY:
+                    run.last_used = time.time()
+
+    def release(self) -> None:
+        with self._lock:
+            self._holders = max(0, self._holders - 1)
+
+    @property
+    def holders(self) -> int:
+        return self._holders
+
     def touch(self) -> None:
         """标记"正在用"，推迟空闲退出"""
         with self._lock:
@@ -412,8 +435,13 @@ class Runtime:
         锁内做这些会把 `status()` / `touch()` 一起堵住 40 秒 —— 而
         /api/runtime/touch 是作业运行中被高频调用的。顺带也避免了与
         stop_all 同时杀同一个进程（双 taskkill + 并发 Popen.wait）。
+
+        **有持有者时一律不回收**（见 `acquire`）：正在跑的作业不能被
+        空闲巡检把模型杀掉。
         """
         if self.idle_timeout <= 0:
+            return []
+        if self._holders > 0:
             return []
         now = time.time()
         victims: list[Running] = []

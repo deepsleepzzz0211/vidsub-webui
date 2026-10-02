@@ -135,10 +135,6 @@ def total_size_bytes() -> int:
     return sum(a.size_bytes for a in ASSETS)
 
 
-def url_for(asset: Asset, source: Source | None = None) -> str:
-    return asset.url(source)
-
-
 # 落盘时的相对目录。**不能含空格** —— 含空格的绝对路径会让 llama-server
 # 拒绝启动、让 ffmpeg 的字幕滤镜打不开文件。
 def rel_path(asset: Asset) -> str:

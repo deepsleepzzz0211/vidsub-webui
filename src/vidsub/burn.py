@@ -40,7 +40,8 @@ class BurnError(RuntimeError):
 
 
 def _extract_cues(srt_path: str) -> list:
-    text = open(srt_path, encoding="utf-8").read()
+    with open(srt_path, encoding="utf-8") as f:
+        text = f.read()
     blocks = re.split(r"\n\s*\n", text.strip())
     cues = []
     for b in blocks:
@@ -129,13 +130,10 @@ def burn(video: str, srt_path: str, out: str, mono: bool = False,
             "  `-c:a copy` 遇到不存在的音轨流时不会报错，是静默失败。")
 
     # 断言 3：时长与源一致
-    try:
-        d_src = _probe_duration(src_name, cwd=stage)
-        d_out = _probe_duration(os.path.abspath(out))
-        if abs(d_src - d_out) > 1.0:
-            raise BurnError(
-                f"成片时长与源不符：源 {d_src:.2f}s，成片 {d_out:.2f}s")
-    except BurnError:
-        raise
+    d_src = _probe_duration(src_name, cwd=stage)
+    d_out = _probe_duration(os.path.abspath(out))
+    if abs(d_src - d_out) > 1.0:
+        raise BurnError(
+            f"成片时长与源不符：源 {d_src:.2f}s，成片 {d_out:.2f}s")
 
     return out

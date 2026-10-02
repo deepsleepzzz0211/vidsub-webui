@@ -25,7 +25,7 @@ import urllib.error
 import urllib.request
 from typing import Callable, Optional
 
-from . import audio, vad
+from . import audio, styles, vad
 
 ASR_PORT = 8081
 MT_PORT = 8082
@@ -60,7 +60,8 @@ def transcribe(wav: str, asr_url: str = ASR_URL,
 
     R2T2 的输出形如 `language en<asr_text>hello world`。
     """
-    b64 = base64.b64encode(open(wav, "rb").read()).decode()
+    with open(wav, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
     payload = {"messages": [{"role": "user", "content": [
         {"type": "text", "text": "Transcribe the audio."},
         {"type": "input_audio", "input_audio": {"data": b64, "format": "wav"}},
@@ -112,10 +113,7 @@ def translate(text: str, target: str = "Chinese",
 
 
 def fmt_ts(sec: float) -> str:
-    h = int(sec // 3600)
-    m = int((sec % 3600) // 60)
-    s = sec % 60
-    return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
+    return styles._ts(sec)
 
 
 def write_srt(cues: list, path: str, mono: bool = False,
@@ -134,7 +132,8 @@ def write_srt(cues: list, path: str, mono: bool = False,
 
 def run(video_path: str, out_srt: str,
         work_dir: Optional[str] = None,
-        progress: Optional[Callable[[int, int], None]] = None,
+        progress: Optional[Callable[..., None]] = None,
+        on_stage: Optional[Callable[[str], None]] = None,
         asr_url: str = ASR_URL, mt_url: str = MT_URL,
         vad_model: Optional[str] = None,
         mono: bool = False, target: str = "Chinese") -> str:
@@ -143,14 +142,25 @@ def run(video_path: str, out_srt: str,
     返回 out_srt 路径。工作目录默认取视频同目录下的 work，由调用方保证
     不含空格（jobs.py 负责）。失败时抛出 `MediaError` / `NoSpeechError` /
     `PipelineError`，消息面向用户。
+
+    `on_stage` 报大阶段（抽音轨/切分/翻译/写出），`progress(i, total, stage,
+    translated)` 报段落级进度 —— 05 号票要求页面上能看到"现在在干嘛"，
+    光有 `识别中 3/226` 是不够的：抽音轨和切分在 226 段的大视频上要花掉
+    好几分钟，那段时间里进度条一动不动会让人以为卡死了。
     """
+    def stage(label: str) -> None:
+        if on_stage:
+            on_stage(label)
+
     if work_dir is None:
         work_dir = os.path.join(os.path.dirname(os.path.abspath(video_path)), "work")
     os.makedirs(work_dir, exist_ok=True)
 
+    stage("抽取音轨")
     wav = os.path.join(work_dir, "audio.wav")
     audio.extract_audio(video_path, wav)
 
+    stage("切分语音")
     segs = vad.segments(wav, model_path=vad_model)
     if not segs:
         # 正常路径里 vad.segments 检出 0 段会自己抛 NoSpeechError；
@@ -158,15 +168,19 @@ def run(video_path: str, out_srt: str,
         from .vad import NoSpeechError
         raise NoSpeechError("流水线拿到 0 个语音段，无法产出字幕")
 
+    stage(f"识别并翻译（共 {len(segs)} 段）")
     cues = []
     for i, (a, b) in enumerate(segs):
         if progress:
-            progress(i + 1, len(segs))
+            progress(i, len(segs), "识别并翻译", i)
         part = os.path.join(work_dir, f"seg_{i:04d}.wav")
         audio.slice_wav(wav, part, a, b - a)
         _, src = transcribe(part, asr_url=asr_url)
         dst = translate(src, target=target, mt_url=mt_url)
         cues.append((a, b, src, dst))
+        if progress:
+            progress(i + 1, len(segs), "识别并翻译", i + 1)
 
+    stage("写出字幕")
     write_srt(cues, out_srt, mono=mono)
     return out_srt

@@ -393,14 +393,34 @@ def _ensure_runtime_then_start(job_id: str) -> None:
     jobs().start(job_id)
 
 
-def job_event_stream(job_id: str, max_ticks: int = 600, pause: float = 1.0):
+# SSE 的存活上限。**不能设成"作业预计时间的量级"** —— 05 号票的前提就是
+# 70 分钟视频要跑 20 分钟以上，600 秒（10 分钟）会在作业跑到一半时把连接
+# 掐断，页面从此不再更新，用户以为死了。给足 12 小时：正常作业远到不了，
+# 而真到上限时也该由浏览器重连兜底，不是让服务端替用户放弃。
+SSE_MAX_TICKS = int(os.environ.get("VIDSUB_SSE_MAX_SECONDS", "43200"))
+
+
+def job_event_stream(job_id: str, max_ticks: int = 0, pause: float = 1.0,
+                     heartbeat_every: int = 15):
     """作业进度的 SSE 事件流。每次状态变化推一条 data:。
 
-    作业进入 done/failed 且没有burn 排队的锁，就收尾退出。
+    **烧录也算作业的一部分**：done 只代表字幕写完，压制还在跑的时候流必须
+    留着，否则页面永远看不到"压制中 → 完成"。收尾条件是"作业到终态 **且**
+    没有压制在进行"。
+
+    `heartbeat_every` 用来打注释帧（`: keepalive`）：状态长时间不变的阶段
+    （一段长推理可能几十秒）不发数据的话，反向代理会把连接当空闲掐掉。
+
+    收尾条件刻意**不含**「等用户点压制」：那意味着一个做完字幕的作业会
+    占住一个 anyio 线程池线程直到上限（几小时），几十个历史作业就能把
+    线程池抽干。压制进度由前端在点压制时**重新订阅**一次流来跟 ——
+    每次订阅都是有界的，这比让服务端替用户空等要稳。
     """
     import time as _t
+    if max_ticks <= 0:
+        max_ticks = SSE_MAX_TICKS
     last = None
-    for _ in range(max_ticks):
+    for tick in range(max_ticks):
         j = jobs().get(job_id)
         if not j:
             yield "event: error\ndata: 作业不存在\n\n"
@@ -410,7 +430,9 @@ def job_event_stream(job_id: str, max_ticks: int = 600, pause: float = 1.0):
         if payload != last:
             yield f"data: {payload}\n\n"
             last = payload
-        if j.get("state") in ("done", "failed") and j.get("burn_state") in ("", "done", "failed"):
+        elif heartbeat_every and tick % heartbeat_every == 0:
+            yield ": keepalive\n\n"
+        if j.get("state") in ("done", "failed") and j.get("burn_state") != "running":
             return
         _t.sleep(pause)
 

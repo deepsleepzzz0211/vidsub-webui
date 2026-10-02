@@ -11,17 +11,18 @@
 """
 from __future__ import annotations
 
-import re
-from typing import Optional
-
 MAX_ZH = 34
 MAX_WORDS = 18
 
-_LINE = re.compile(r"[\u4e00-\u9fff]")
-
-
-def _is_zh(text: str) -> bool:
-    return bool(_LINE.search(text))
+# 相邻两条字幕**整句相同**、间隔不超过 DUP_WINDOW 秒时，判为切分抖动并掐掉
+# 后一条。两个阈值缺一不可：
+#   DUP_WINDOW —— 说话人隔 10 秒说两遍 "yes" 是正常内容，不该删。
+#   DUP_MIN_LEN —— 一两个词的重复（"yes" "okay"）在真实对话里很常见，
+#     删掉是破坏内容；只有**整句**被切两次才是抖动。中文按字数、英文按词数，
+#     取两边的较大值。
+DUP_WINDOW = 1.0
+DUP_MIN_WORDS = 4
+DUP_MIN_CHARS = 8
 
 
 def split_cues(cues: list, max_zh: int = MAX_ZH,
@@ -69,13 +70,55 @@ def split_cues(cues: list, max_zh: int = MAX_ZH,
     return out
 
 
+def _repair(cues: list, dup_window: float = DUP_WINDOW) -> list:
+    """修时间轴：裁重叠、掐掉相邻重复。09 号票的不变量。
+
+    - **重叠**：两条 cue 时间交叠时把后者起点推到前者终点。交叠的字幕在
+      播放时会同时显示两行，视觉上就是重影。VAD 理论上不产出交叠段，
+      但 ASR 段的时间是模型给的，边界会互相压到 —— 不能假设上游干净。
+    - **相邻重复**：中英**整句都相同**、间隔在 `dup_window` 秒内、且句子
+      足够长，才掐掉后一条。三个条件缺一不可：短句（"yes" "okay"）在真实
+      对话里反复出现，删掉是破坏内容；间隔大的重复是说话人真的又说一遍。
+      只有"长句 + 紧挨着 + 一字不差"才是切分抖动。
+    """
+    out: list = []
+    prev_end = None
+    prev_key = None
+    prev_is_long = False
+    prev_end_t = None
+    for start, end, src, dst in cues:
+        if prev_end is not None and start < prev_end:
+            start = prev_end
+        if end <= start:
+            continue                      # 被裁成空的了，丢掉
+        zh, en = dst or "", src or ""
+        if (prev_end_t is not None and start - prev_end_t <= dup_window
+                and prev_is_long and (zh, en) == prev_key):
+            continue
+        out.append((start, end, src, dst))
+        prev_end = end
+        prev_end_t = end
+        prev_key = (zh, en)
+        prev_is_long = _is_long(zh, en)
+    return out
+
+
+def _is_long(zh: str, en: str) -> bool:
+    """够不够"长到像一句被切了两次的话"。"""
+    return len(zh.strip()) >= DUP_MIN_CHARS or len(en.split()) >= DUP_MIN_WORDS
+
+
 def format_srt(cues: list, style: str = "bilingual", max_zh: int = MAX_ZH,
                max_words: int = MAX_WORDS) -> str:
-    """把 cue 列表渲染成 SRT 文本。style ∈ bilingual / mono / en。"""
+    """把 cue 列表渲染成 SRT 文本。style ∈ bilingual / mono / en。
+
+    顺序：先分段（长 cue 拆细）→ 再修时间轴（裁重叠、掐重复）→ 再渲染。
+    修复放在分段之后：拆分会让子 cue 首尾相接，正是最容易撞上重复的地方。
+    """
     splited = split_cues(cues, max_zh=max_zh, max_words=max_words)
     lines: list[str] = []
     n = 0
-    for start, end, src, dst in splited:
+    for start, end, src, dst in _repair(splited):
         if style == "mono":
             rows = [dst]
         elif style == "en":
@@ -91,10 +134,6 @@ def format_srt(cues: list, style: str = "bilingual", max_zh: int = MAX_ZH,
         lines.extend(rows)
         lines.append("")
     return "\n".join(lines)
-
-
-def _has_zh(text: str) -> bool:
-    return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
 
 
 def _ts(sec: float) -> str:

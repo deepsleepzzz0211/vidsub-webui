@@ -75,3 +75,35 @@ def test_stream_ends_when_job_vanishes(monkeypatch):
     monkeypatch.setattr(server, "jobs", lambda: EmptyJobs())
     events = list(server.job_event_stream("x", max_ticks=10, pause=0))
     assert events == ["event: error\ndata: 作业不存在\n\n"]
+
+
+def test_stream_survives_long_job(monkeypatch):
+    """长任务不能被上限掐断。
+
+    05 号票的前提是「70 分钟视频跑 20 分钟以上」。曾经 max_ticks=600
+    （10 分钟）会把连接在作业跑到一半时掐掉，页面从此不再更新 ——
+    这条钉死默认上限必须远大于任何真实作业时长。
+    """
+    assert server.SSE_MAX_TICKS >= 3600, \
+        f"上限 {server.SSE_MAX_TICKS}s 太短，长任务会被中途断流"
+
+    # 一个 5 小时还在 running 的作业：流不能提前结束
+    class StillRunning:
+        def get(self, _id):
+            return _job("running", "识别 3/226")
+    monkeypatch.setattr(server, "jobs", lambda: StillRunning())
+    got = list(server.job_event_stream("x", max_ticks=30, pause=0,
+                                       heartbeat_every=0))
+    # 30 tick 只推 1 条 data（状态没变），但绝不能收尾
+    assert len(got) == 1, got
+
+
+def test_stream_heartbeats_while_quiet(monkeypatch):
+    """状态长时间不变也要发心跳，否则反向代理会把连接当空闲掐掉。"""
+    class StillRunning:
+        def get(self, _id):
+            return _job("running", "识别 3/226")
+    monkeypatch.setattr(server, "jobs", lambda: StillRunning())
+    got = list(server.job_event_stream("x", max_ticks=8, pause=0,
+                                       heartbeat_every=3))
+    assert sum(1 for c in got if c.startswith(": keepalive")) == 2, got

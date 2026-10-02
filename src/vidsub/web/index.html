@@ -37,6 +37,9 @@
   .bar { height: 6px; border-radius: 99px; background: rgba(128,128,128,.25); margin-top: .5rem; overflow: hidden; }
   .bar > i { display: block; height: 100%; width: 0; background: currentColor; }
   .errmsg { color: var(--err); font-size: .85rem; margin-top: .3rem; white-space: pre-wrap; }
+  .style { margin: 1.1rem 0; display: flex; align-items: center; gap: .55rem; font-size: .92rem; }
+  .style select { font: inherit; padding: .35rem .5rem; border-radius: 8px; }
+  .style .hint { opacity: .6; font-size: .82rem; }
   a { color: inherit; }
 </style>
 </head>
@@ -51,6 +54,15 @@
     <input type="file" id="file" accept="video/*,audio/*" style="display:none">
   </div>
   <div id="meta" class="meta"></div>
+
+  <div class="style">
+    <label for="style">字幕样式</label>
+    <select id="style">
+      <option value="bilingual" selected>中英双语</option>
+      <option value="mono">纯中文</option>
+    </select>
+    <span class="hint">压制成片时生效</span>
+  </div>
 
   <h2 style="font-size:1rem;margin:1.6rem 0 .6rem">作业</h2>
   <div id="jobs"></div>
@@ -122,37 +134,56 @@ function renderJob(j) {
   </div>`;
 }
 
+// 已订阅的流，防止同一个作业开一堆 EventSource
+const watched = new Set();
+
 function watchJob(jobId) {
+  if (watched.has(jobId)) return;
+  watched.add(jobId);
+  let es;
   try {
-    const es = new EventSource(`/api/jobs/${jobId}/stream`);
-    es.onmessage = (e) => {
-      const j = JSON.parse(e.data);
-      const row = document.getElementById('job-' + jobId);
-      if (row) {
-        const p = j.progress || {};
-        const ratio = p.total ? Math.min(1, p.i / p.total) : 0;
-        const bar = row.querySelector('.bar > i');
-        if (bar) bar.style.width = (ratio * 100) + '%';
-        const st = row.querySelector('.state');
-        if (st) st.textContent = ({done:'完成',failed:'失败',running:'处理中',pending:'排队中'})[j.state] + ' · ' + (p.label || '') + '';
-        if (j.state === 'failed') {
-          const e2 = row.querySelector('.errmsg');
-          if (e2) e2.textContent = (j.error || '').split('\n')[0];
-        }
+    es = new EventSource(`/api/jobs/${jobId}/stream`);
+  } catch (e) {
+    watched.delete(jobId);
+    return;                       // EventSource 不可用就退回轮询
+  }
+  es.onmessage = (e) => {
+    const j = JSON.parse(e.data);
+    const row = document.getElementById('job-' + jobId);
+    if (row) {
+      const p = j.progress || {};
+      const ratio = p.total ? Math.min(1, p.i / p.total) : 0;
+      const bar = row.querySelector('.bar > i');
+      if (bar) bar.style.width = (ratio * 100) + '%';
+      const st = row.querySelector('.state');
+      if (st) {
+        const txt = p.label || '';
+        const extra = p.translated ? ` · 已翻译 ${p.translated} 条` : '';
+        st.textContent = ({done:'完成',failed:'失败',running:'处理中',pending:'排队中'})[j.state] + ' · ' + txt + extra;
       }
-      if (j.state === 'done' || j.state === 'failed') { es.close(); poll(); }
-    };
-    es.onerror = () => { es.close(); };
-  } catch (e) { /* EventSource 不可用就退回轮询 */ }
+      if (j.state === 'failed') {
+        const e2 = row.querySelector('.errmsg');
+        if (e2) e2.textContent = (j.error || '').split('\n')[0];
+      }
+    }
+    if (j.state === 'done' || j.state === 'failed') { es.close(); watched.delete(jobId); poll(); }
+  };
+  es.onerror = () => { es.close(); watched.delete(jobId); };
 }
 
 async function burn(jobId) {
-  const r = await fetch(`/api/jobs/${jobId}/burn`, { method: 'POST' });
+  // 样式必须显式传：服务端默认 mono=false，不传就永远是双语，
+  // 页面上的样式选择器会变成摆设。
+  const mono = $('style').value === 'mono';
+  const r = await fetch(`/api/jobs/${jobId}/burn?mono=${mono}`, { method: 'POST' });
   const b = await r.json();
   if (!r.ok) {
     alert('压制失败：' + (b.error || r.statusText));
+    poll();
     return;
   }
+  // 压制是用户后发起的，SSE 那条流早已收尾 —— 重新订阅一次来跟压制进度
+  watchJob(jobId);
   poll();
 }
 
