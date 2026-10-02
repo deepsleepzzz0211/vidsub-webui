@@ -1,6 +1,6 @@
 import { test as base, expect } from '@playwright/test';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, existsSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -12,7 +12,13 @@ export type Fixtures = {
   serverUrl: string;
   dataDir: string;
   tmpDir: string;
+  /** 数据目录里要不要挂真权重。默认 false —— "缺模型"那批用例依赖它。 */
+  withModels: boolean;
 };
+
+/** 真模型链路用例：test.use({ withModels: true }) 单独打开。 */
+
+
 
 /**
  * 找一个空闲端口。
@@ -79,6 +85,35 @@ async function stopTree(proc: ChildProcess): Promise<void> {
 }
 
 /**
+ * 要上传的素材。
+ *
+ * 默认 150 秒的 fixture 跑真模型要十几分钟（226 段逐段识别+翻译），
+ * 迭代时等不起。VIDSUB_E2E_FIXTURE 可以换成短片段（20 秒 ≈ 9 段），
+ * 断言强度不变，只是覆盖面小一些 —— 时间轴/双语/音轨这些不变量与
+ * 素材长度无关。
+ */
+export function fixtureFor(name: string): string {
+  return process.env.VIDSUB_E2E_FIXTURE || path.resolve(ROOT, '.e2e-cache', name);
+}
+
+/**
+ * 第二个素材（比第一个更短），用于"两个作业不串内容"。
+ *
+ * **必须真的比第一个短**：13 号票靠"两份字幕条数不同"来证明没串内容。
+ * 如果两段素材等长，两份产物本来就该一样，串了也验不出来。
+ */
+export function shorterFixtureFor(name: string): string {
+  const override = process.env.VIDSUB_E2E_FIXTURE_SHORTER;
+  if (override) return override;
+  // 不从 VIDSUB_E2E_FIXTURE 推导：那是"主素材"的覆盖值，拿它推出来的
+  // clip 只会和主素材指向同一个文件，"两段不同内容"的前提就塌了。
+  // 默认规则：去掉 -NNs 后缀（fixture-40s.mp4 -> fixture.mp4）
+  const base = path.resolve(ROOT, '.e2e-cache', name);
+  const m = /^(.*)-(\d+)s(\.[^.]+)$/.exec(path.basename(base));
+  return m ? path.resolve(ROOT, '.e2e-cache', `${m[1]}${m[3]}`) : base;
+}
+
+/**
  * 每个用例一套隔离环境：
  * - 数据目录指向临时位置，**绝不读写开发者自己的 ~/.vidsub**
  * - HuggingFace / ModelScope 的缓存根也重定向到临时位置：否则"重扫缓存"
@@ -88,15 +123,36 @@ async function stopTree(proc: ChildProcess): Promise<void> {
  * - 只绑 127.0.0.1
  */
 export const test = base.extend<Fixtures>({
-  dataDir: async ({}, use) => {
-    // 设了 VIDSUB_DATA_DIR 就用它（真模型 E2E 用），否则临时目录隔离
-    const given = process.env.VIDSUB_DATA_DIR;
-    if (given) {
-      await use(given);
-      return;
-    }
+  // 默认不挂真权重："缺模型时重定向到下载页"那批用例依赖这个前提。
+  // 真模型用例自己写 test.use({ withModels: true })。
+  withModels: [false, { option: true }],
+
+  dataDir: async ({ withModels }, use) => {
     const dir = mkdtempSync(path.join(tmpdir(), 'vidsub-e2e-'));
     try {
+      // 真模型 E2E：**只挂权重，不共享整个数据目录**。
+      //
+      // 曾经直接把 VIDSUB_DATA_DIR 透传给真实权重目录，结果每个用例的新
+      // 服务进程都共享同一个 jobs/ —— 于是 "等 N 个作业 done" 数到的是
+      // 历史作业，断言拿着陈旧的 job id 全盘失真。更隐蔽的是 pending：
+      // 上一轮跑剩的作业标签停在 create() 的初始值「等待开始」，
+      // 和 start() 写的「排队中」不同，一眼就能看出是残留。
+      //
+      // 权重是只读的，junction 挂进去既省 2.6 GB 复制又能被认领逻辑
+      // 正常看到；jobs 目录留在临时目录里，每个用例真正独立。
+      //
+      // `withModels: false` 用来跑"缺模型"那批用例 —— 全局挂上真权重
+      // 会让它们的前提（模型没就绪）整个消失。
+      if (withModels) {
+        const realModels = process.env.VIDSUB_REAL_MODELS_DIR;
+        if (!realModels || !existsSync(realModels)) {
+          throw new Error(
+            '用例要求真权重，但没设 VIDSUB_REAL_MODELS_DIR。\n' +
+            '  例：$env:VIDSUB_REAL_MODELS_DIR="D:\\vsdata\\models"',
+          );
+        }
+        symlinkSync(realModels, path.join(dir, 'models'), 'junction');
+      }
       await use(dir);
     } finally {
       // 临时目录要清理：每次跑留一个的话会单调堆积
@@ -119,11 +175,14 @@ export const test = base.extend<Fixtures>({
         cwd: ROOT,
         env: {
           ...process.env,
+          // 每个用例独立的临时目录（真权重以 junction 挂进去）
           VIDSUB_DATA_DIR: dataDir,
-          // 真模型 E2E：沿用调用方指定的真实权重目录与 llama-server
+          // llama-server 二进制：沿用调用方指定的
           ...(process.env.VIDSUB_LLAMA_SERVER
             ? { VIDSUB_LLAMA_SERVER: process.env.VIDSUB_LLAMA_SERVER } : {}),
-          // 把缓存根也隔离，避免读到开发者机器上的真实权重
+          // 缓存根必须留在临时目录内：否则 /api/models 会去读开发者
+          // 真实 ~/.cache/huggingface，结果随机器而变（别人机器上
+          // 缓存里有 → 用例失败）
           HF_HOME: path.join(dataDir, 'hf'),
           HF_HUB_CACHE: path.join(dataDir, 'hf', 'hub'),
           MODELSCOPE_CACHE: path.join(dataDir, 'mscache'),

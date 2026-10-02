@@ -1,4 +1,4 @@
-import { test, expect } from './fixture';
+import { test, expect, fixtureFor } from './fixture';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -7,14 +7,15 @@ import path from 'node:path';
 /**
  * 12 号票：E2E —— 压制成片可播放且带声音、进度有变化、下载拿到的是本次产物
  *
- * 同 11：真实链路只有在备好真模型+真二进制时才跑（VIDSUB_REAL_MODELS=1，
- * 并把 VIDSUB_DATA_DIR / VIDSUB_LLAMA_SERVER 指到真机的权重与 llama-server）。
- * 默认 skip。
+ * 真模型链路，跑法同 11 号票（VIDSUB_REAL_MODELS / VIDSUB_REAL_MODELS_DIR /
+ * VIDSUB_LLAMA_SERVER）。没设权重目录就 skip。
  */
-const REAL = process.env.VIDSUB_REAL_MODELS === '1';
-const FIXTURE = path.resolve(__dirname, '..', '.e2e-cache', 'fixture.mp4');
+test.use({ withModels: true });
 
-test.skip(!REAL, '未设置 VIDSUB_REAL_MODELS=1，跳过真模型链路');
+const FIXTURE = fixtureFor('fixture.mp4');
+
+// 压制要逐帧烧字幕，真模型下很慢
+test.setTimeout(45 * 60 * 1000);
 
 /** ffprobe：返回音轨条数与时长。压制的核心断言就靠它，不靠"能播"。 */
 function probe(file: string) {

@@ -1,18 +1,22 @@
-import { test, expect } from './fixture';
+import { test, expect, fixtureFor } from './fixture';
 import path from 'node:path';
 
 /**
  * 11 号票：浏览器打开页 → 拖入视频 → 显示信息 → 出字幕（中文在上英文在下）
  *
- * 这条用例要把真实模型链路跑一遍。只有在环境里备好真模型+真二进制时才跑：
- *   set VIDSUB_REAL_MODELS=1 && set VIDSUB_LLAMA_SERVER=..
- *   并把 VIDSUB_DATA_DIR 指向已备好权重的目录（本机是 D:\vsdata）
- * 否则直接 skip（组件级确定性由 pytest 覆盖）。
+ * 真模型链路，只有备好权重+二进制时才跑：
+ *   $env:VIDSUB_REAL_MODELS=1
+ *   $env:VIDSUB_REAL_MODELS_DIR="D:\vsdata\models"   # 只挂权重，jobs 仍隔离
+ *   $env:VIDSUB_LLAMA_SERVER="...\llama-server.exe"
+ * 没设就 skip —— 组件级确定性由 pytest 覆盖。
  */
-const REAL = process.env.VIDSUB_REAL_MODELS === '1';
-const FIXTURE = path.resolve(__dirname, '..', '.e2e-cache', 'fixture.mp4');
+test.use({ withModels: true });
 
-test.skip(!REAL, '未设置 VIDSUB_REAL_MODELS=1，跳过真模型链路');
+const FIXTURE = fixtureFor('fixture.mp4');
+
+// 真模型下一条视频的完整链路要几十秒到几分钟，逐条跑很容易撞上 Playwright
+// 默认的 5 分钟上限。
+test.setTimeout(45 * 60 * 1000);
 
 test('真视频上传后出字幕，中文在上英文在下且时间轴单调', async ({ page, serverUrl }) => {
   await page.goto(serverUrl);
