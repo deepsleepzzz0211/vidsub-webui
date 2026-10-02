@@ -48,7 +48,10 @@ class JobManager:
     def __init__(self, root: Optional[str] = None):
         self.root = root or _jobs_root()
         self._lock = threading.RLock()
-        self._running: set = set()      # 防止同一 job 被并发 start 两次启两条线程
+        self._running: set = set()      # 防止同一 job 被并发 start 两次
+        self._queue: list = []             # 串行队列（作业一个个来，CPU 推理是独占的）
+        self._worker: Optional[threading.Thread] = None
+        self._burn_lock = threading.Lock()  # 压制也排队，不许两个 ffmpeg 抢 CPU
         os.makedirs(self.root, exist_ok=True)
 
     # --- 查询 ------------------------------------------------------------
@@ -119,28 +122,45 @@ class JobManager:
     # --- 执行 ------------------------------------------------------------
 
     def start(self, job_id: str) -> dict:
-        """后台跑流水线。幂等：已经在跑就不重复启动。"""
+        """入队跑流水线。幂等：已在队列/在跑/已完成的不重复排。"""
         job = self.get(job_id)
         if not job:
             raise JobError(f"job 不存在：{job_id}")
         with self._lock:
-            if job_id in self._running:
-                return job           # 已经在跑，别再启一条线程
-            self._running.add(job_id)
-            state = job["state"]
-
-        if state == RUNNING:
-            with self._lock:
-                self._running.discard(job_id)
-            return job
-        self.update(job_id, state=RUNNING, progress={"i": 0, "total": 0,
-                                                      "label": "排队中"})
-        t = threading.Thread(target=self._run, args=(job_id,), daemon=True,
-                             name=f"vidsub-job-{job_id}")
-        t.start()
+            if job_id in self._queue or job_id in self._running:
+                return job
+            if job["state"] == DONE:
+                return job
+            self._queue.append(job_id)
+            self.update(job_id, state=PENDING,
+                        progress={"i": 0, "total": 0, "label": "排队中，等轮到执行"})
+            self._ensure_worker()
         return self.get(job_id)
 
+    def _ensure_worker(self) -> None:
+        if self._worker and self._worker.is_alive():
+            return
+        self._worker = threading.Thread(target=self._worker_loop,
+                                        daemon=True, name="vidsub-jobs-worker")
+        self._worker.start()
+
+    def _worker_loop(self) -> None:
+        """单 worker 串行执行：CPU 推理独占，同一时刻只能跑一个 job。"""
+        while True:
+            with self._lock:
+                if not self._queue:
+                    self._worker = None
+                    return
+                job_id = self._queue.pop(0)
+                self._running.add(job_id)
+            try:
+                self._run(job_id)
+            finally:
+                with self._lock:
+                    self._running.discard(job_id)
+
     def _run(self, job_id: str) -> None:
+        """真正跑一个 job（只在 worker 里被调用）。"""
         job = self.get(job_id)
         if not job:
             return
@@ -148,8 +168,7 @@ class JobManager:
                                                       "label": "解析视频"})
         try:
             def _progress(i: int, total: int):
-                j = self.get(job_id)
-                if j:
+                if self.get(job_id):
                     self.update(job_id, progress={"i": i, "total": total,
                                                    "label": f"识别中 {i}/{total}"})
 
@@ -167,9 +186,6 @@ class JobManager:
         except Exception as e:  # noqa: BLE001
             self.update(job_id, state=FAILED, error=f"{type(e).__name__}: {e}",
                         progress={"i": 0, "total": 0, "label": "失败"})
-        finally:
-            with self._lock:
-                self._running.discard(job_id)
 
     # --- 压制 ---
 
@@ -189,16 +205,18 @@ class JobManager:
         return self.get(job_id)
 
     def _burn(self, job_id: str, mono: bool) -> None:
-        job = self.get(job_id)
-        if not job:
-            return
-        try:
-            out = os.path.join(os.path.dirname(job["srt"]), "subtitled.mp4")
-            burn_mod.burn(job["video"], job["srt"], out, mono=mono,
-                          stage_dir=job["work_dir"])
-            self.update(job_id, burn_state="done", video_mp4=out)
-        except burn_mod.BurnError as e:
-            self.update(job_id, burn_state="failed", error=str(e))
-        except Exception as e:  # noqa: BLE001
-            self.update(job_id, burn_state="failed",
-                        error=f"{type(e).__name__}: {e}")
+        # 压制也串行：ffmpeg 是 CPU 密集型，两个并行压只会互相拖慢
+        with self._burn_lock:
+            job = self.get(job_id)
+            if not job:
+                return
+            try:
+                out = os.path.join(os.path.dirname(job["srt"]), "subtitled.mp4")
+                burn_mod.burn(job["video"], job["srt"], out, mono=mono,
+                              stage_dir=job["work_dir"])
+                self.update(job_id, burn_state="done", video_mp4=out)
+            except burn_mod.BurnError as e:
+                self.update(job_id, burn_state="failed", error=str(e))
+            except Exception as e:  # noqa: BLE001
+                self.update(job_id, burn_state="failed",
+                            error=f"{type(e).__name__}: {e}")

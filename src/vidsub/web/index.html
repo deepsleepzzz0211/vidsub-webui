@@ -90,6 +90,7 @@ async function upload(file) {
   const i = b.info || {};
   $('meta').textContent =
     `${file.name} · 时长 ${dur(i.duration)} · ${i.width || '—'}×${i.height || '—'} · ${fmt(i.size_bytes || file.size)}`;
+  watchJob(b.id);
   poll();
 }
 
@@ -106,7 +107,7 @@ function renderJob(j) {
   const p = j.progress || {};
   const ratio = p.total ? Math.min(1, p.i / p.total) : 0;
   const stateMap = { pending: '排队中', running: '处理中', done: '完成', failed: '失败' };
-  return `<div class="job">
+  return `<div class="job" id="job-${j.id}">
     <div class="row"><span class="name">${j.filename}</span>
       <span>${dur(j.info && j.info.duration)} · ${j.info && j.info.width ? j.info.width + '×' + j.info.height : ''}</span></div>
     <div class="state ${j.state}">${stateMap[j.state] || j.state} · ${p.label || ''}</div>
@@ -119,6 +120,30 @@ function renderJob(j) {
     ${j.burn_state === 'failed' ? `<div class="errmsg">${(j.error || '').split('\n')[0]}</div>` : ''}
     ${j.burn_state === 'done' ? `<a href="/api/jobs/${j.id}/video" target="_blank">预览成片</a>` : ''}
   </div>`;
+}
+
+function watchJob(jobId) {
+  try {
+    const es = new EventSource(`/api/jobs/${jobId}/stream`);
+    es.onmessage = (e) => {
+      const j = JSON.parse(e.data);
+      const row = document.getElementById('job-' + jobId);
+      if (row) {
+        const p = j.progress || {};
+        const ratio = p.total ? Math.min(1, p.i / p.total) : 0;
+        const bar = row.querySelector('.bar > i');
+        if (bar) bar.style.width = (ratio * 100) + '%';
+        const st = row.querySelector('.state');
+        if (st) st.textContent = ({done:'完成',failed:'失败',running:'处理中',pending:'排队中'})[j.state] + ' · ' + (p.label || '') + '';
+        if (j.state === 'failed') {
+          const e2 = row.querySelector('.errmsg');
+          if (e2) e2.textContent = (j.error || '').split('\n')[0];
+        }
+      }
+      if (j.state === 'done' || j.state === 'failed') { es.close(); poll(); }
+    };
+    es.onerror = () => { es.close(); };
+  } catch (e) { /* EventSource 不可用就退回轮询 */ }
 }
 
 async function burn(jobId) {

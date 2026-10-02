@@ -7,6 +7,7 @@
 会残留成孤儿、白占几 GB 内存。所以所有子进程都要登记到这里，退出时统一收掉。
 """
 import atexit
+import json
 import os
 import signal
 import subprocess
@@ -14,7 +15,8 @@ import sys
 import threading
 
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import (FileResponse, JSONResponse, RedirectResponse,
+                               StreamingResponse)
 
 from . import audio, discovery, downloader, launcher
 from . import registry, runtime
@@ -389,6 +391,34 @@ def _ensure_runtime_then_start(job_id: str) -> None:
         jobs().update(job_id, state="failed", error=str(e))
         return
     jobs().start(job_id)
+
+
+def job_event_stream(job_id: str, max_ticks: int = 600, pause: float = 1.0):
+    """作业进度的 SSE 事件流。每次状态变化推一条 data:。
+
+    作业进入 done/failed 且没有burn 排队的锁，就收尾退出。
+    """
+    import time as _t
+    last = None
+    for _ in range(max_ticks):
+        j = jobs().get(job_id)
+        if not j:
+            yield "event: error\ndata: 作业不存在\n\n"
+            return
+        info = {k: j.get(k) for k in ("id", "state", "error", "progress", "burn_state")}
+        payload = json.dumps(info, ensure_ascii=False)
+        if payload != last:
+            yield f"data: {payload}\n\n"
+            last = payload
+        if j.get("state") in ("done", "failed") and j.get("burn_state") in ("", "done", "failed"):
+            return
+        _t.sleep(pause)
+
+
+@app.get("/api/jobs/{job_id}/stream")
+def job_stream(job_id: str):
+    return StreamingResponse(job_event_stream(job_id),
+                             media_type="text/event-stream")
 
 
 @app.get("/api/jobs")
