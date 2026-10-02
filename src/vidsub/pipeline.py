@@ -118,20 +118,18 @@ def fmt_ts(sec: float) -> str:
     return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
 
 
-def write_srt(cues: list, path: str, mono: bool = False) -> None:
-    """中文在上、英文在下。序号与时间轴必须保留 —— 否则成品不是合法 SRT。"""
+def write_srt(cues: list, path: str, mono: bool = False,
+              style: Optional[str] = None) -> None:
+    """渲染 SRT。中文在上、英文在下（mono 只留中文行）。
+
+    长 cue 会先做分段（07）—— 否则一整条字会盖掉整个幻灯片。
+    序号与时间轴必须保留 —— 只拼文本行产出的不是合法 SRT。
+    """
+    from . import styles
+    style = style or ("mono" if mono else "bilingual")
+    body = styles.format_srt(cues, style=style)
     with open(path, "w", encoding="utf-8") as f:
-        n = 0
-        for a, b, src, dst in cues:
-            if not src.strip() and not dst.strip():
-                continue
-            n += 1
-            f.write(f"{n}\n{fmt_ts(a)} --> {fmt_ts(b)}\n")
-            if dst.strip():
-                f.write(f"{dst.strip()}\n")
-            if src.strip() and not mono:
-                f.write(f"{src.strip()}\n")
-            f.write("\n")
+        f.write(body)
 
 
 def run(video_path: str, out_srt: str,
