@@ -49,9 +49,18 @@ def running_server(port: int | None = None, data_dir: str | None = None,
 
     env = dict(os.environ)
     env["VIDSUB_DATA_DIR"] = tmp          # 隔离：不碰用户自己的 ~/.vidsub
+    # 缓存根也要隔离：否则"重扫缓存"会读到开发者自己 ~/.cache/huggingface
+    # 里的真实权重，结果随机器而变（别人机器上有缓存 → 用例失败）
+    env["HF_HOME"] = os.path.join(tmp, "hf")
+    env["HF_HUB_CACHE"] = os.path.join(tmp, "hf", "hub")
+    env["MODELSCOPE_CACHE"] = os.path.join(tmp, "mscache")
     for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         env.pop(k, None)                   # 免得本地请求被代理劫持
     env["VIDSUB_NO_BROWSER"] = "1"         # 别在测试机上弹浏览器窗口
+    # 选路缓存是模块级的：同进程内起过多个实例时，缓存里的"某域名直连不行"
+    # 会串到下一个实例上。这里每个实例是独立进程，各自带自己的缓存，
+    # 但仍要清一次，防止本进程先前跑别的用例时留下的判定。
+    env.pop("VIDSUB_DOWNLOAD_PROXY", None)  # 测试不该依赖开发机的代理设置
 
     proc = subprocess.Popen(
         [sys.executable, "-m", "vidsub", "--port", str(port)],

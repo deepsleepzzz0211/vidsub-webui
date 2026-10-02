@@ -130,6 +130,18 @@ test('体重正：超过 2 GB 才切 GB', async ({ request, serverUrl }) => {
   expect(asr.size_text).toMatch(/MB$/);
 });
 
+test('说明默认直连、以及代理的四个开关', async ({ page, serverUrl }) => {
+  await page.goto(`${serverUrl}/downloads`);
+  await expect(page.locator('body')).toContainText('下载很慢或连不上');
+  // 默认直连，因为实测走代理更慢 —— 页面要讲清楚，否则用户会主动去设代理
+  await expect(page.locator('body')).toContainText('直连下载');
+  await expect(page.locator('body')).toContainText('21 MB/s');
+  for (const v of ['VIDSUB_DOWNLOAD_PROXY', 'VIDSUB_FORCE_DIRECT',
+                   'VIDSUB_PROXY_HOSTS', 'VIDSUB_DOWNLOAD_TIMEOUT']) {
+    await expect(page.locator('body')).toContainText(v);
+  }
+});
+
 test('数据目录隔离：权重不会落在用户目录', async ({ dataDir }) => {
   // 隔离目录里此时不该有任何 .gguf
   const { existsSync, readdirSync } = await import('node:fs');

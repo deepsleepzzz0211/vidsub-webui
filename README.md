@@ -107,6 +107,44 @@ pytest -m "not e2e_support"
 构建时会强制校验语音占比（当前 37.5%，下限 30%），可用
 `python tools/check_fixture.py <文件>` 手动复验。
 
+## 模型权重
+
+第一次打开页面会看到权重清单（四个文件，约 2.6 GB）。它会**先查本机已有的
+副本**，找不到才下载：
+
+| 来源 | 默认位置 | 目录形态 |
+|---|---|---|
+| HuggingFace | `~/.cache/huggingface/hub` | `models--<org>--<repo>/snapshots/<版本>/<文件>` |
+| ModelScope 1.37 | `~/.cache/modelscope/hub` | `<org>/<repo>/<文件>` |
+| ModelScope 旧版 | 同上 | `models--<org>--<repo>/...` |
+
+认领按 **sha256 + 体积**判定，文件名和层级都不要求；同盘走硬链接，不占额外
+空间。你也可以在下载页手动指定一个目录，把里面已有的权重认领进来。
+
+都找不到时，页面给出每个权重在 ModelScope 上的**直链与可续传命令**
+（`curl -L -C -`），只下单个文件 —— 不建议整个仓库，GGUF 仓库里还有
+Q8_0 / f16 等其它量化，整个下会多花好几倍磁盘和时间。
+
+### 网络相关的环境变量
+
+默认**直连**下载。实测 ModelScope 直连约 21–40 MB/s，走代理反而只有
+240 KB/s；但 GitHub 例外 —— VAD 模型在 GitHub 上，直连会在中途截断，
+所以自动走代理。
+
+| 变量 | 作用 |
+|---|---|
+| `VIDSUB_DOWNLOAD_PROXY` | 代理地址，如 `http://127.0.0.1:7897` |
+| `VIDSUB_FORCE_DIRECT=0` | 全部走代理（墙内网络） |
+| `VIDSUB_PROXY_HOSTS` | 追加需要走代理的域名，逗号分隔 |
+| `VIDSUB_DOWNLOAD_TIMEOUT` | 单次请求超时秒数，默认 60 |
+| `VIDSUB_DATA_DIR` | 权重落盘目录，默认 `~/.vidsub` |
+
+直连遇到网络层错误会**自动回退代理一次**，并记住该域名，不再重复卡超时；
+HTTP 4xx/5xx 不回退（404 是路径写错、416 是范围不合法，换出口也一样）。
+
+`VIDSUB_DATA_DIR` 建议放在权重所在**同一个卷**上，这样认领走硬链接而不是
+复制 2.6 GB。落盘路径不能含空格 —— 含空格的绝对路径会让 llama-server 拒绝启动。
+
 ## 许可
 
 代码 MIT。模型权重许可见上方。

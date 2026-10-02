@@ -107,6 +107,24 @@
     识别模型使用网易自定义协议（不是 Apache 2.0），协议全文随权重一起保存到本机。
     默认从 ModelScope 下载。
   </p>
+
+  <details style="margin-top:1rem">
+    <summary>下载很慢或连不上？</summary>
+    <p class="note" style="margin-top:.6rem">
+      默认<b>直连</b>下载 —— 实测 ModelScope 直连约 21 MB/s，走代理反而只有 240 KB/s。<br>
+      只有 GitHub 例外：VAD 模型在 GitHub 上，直连会在中途截断，所以自动走代理。<br>
+      若你的网络需要手动指定，下载前设这些环境变量再启动 vidsub：
+    </p>
+    <div class="paths mono" style="line-height:2">
+      <div>VIDSUB_DOWNLOAD_PROXY=http://127.0.0.1:7897 —— 指定代理地址</div>
+      <div>VIDSUB_FORCE_DIRECT=0 —— 全部走代理（墙内）</div>
+      <div>VIDSUB_PROXY_HOSTS=mirror.example.com —— 追加需要走代理的域名</div>
+      <div>VIDSUB_DOWNLOAD_TIMEOUT=120 —— 单次请求超时秒数</div>
+    </div>
+    <p class="note">
+      直连失败会自动回退代理一次，并记住这个域名，不再重复卡超时。
+    </p>
+  </details>
 </main>
 
 <script>

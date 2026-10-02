@@ -120,6 +120,9 @@ export const test = base.extend<Fixtures>({
           MODELSCOPE_CACHE: path.join(dataDir, 'mscache'),
           // 免得本地请求被系统代理劫持
           http_proxy: '', https_proxy: '', HTTP_PROXY: '', HTTPS_PROXY: '',
+          // 测试不该依赖开发机的代理设置：走哪条路由会改变
+          // "重扫缓存"之类的结果
+          VIDSUB_DOWNLOAD_PROXY: '',
           // 真实推理阶段会开浏览器窗口，E2E 里必须关掉
           VIDSUB_NO_BROWSER: '1',
         },

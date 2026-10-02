@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -25,18 +26,116 @@ from typing import Callable, Optional
 from . import registry
 
 CHUNK = 1 << 20                      # 1 MiB
+
 PROXY_ENV = "VIDSUB_DOWNLOAD_PROXY"   # 例如 http://127.0.0.1:7897
-_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+PROXY_HOSTS_ENV = "VIDSUB_PROXY_HOSTS"   # 追加需要走代理的域名，逗号分隔
+FORCE_DIRECT_ENV = "VIDSUB_FORCE_DIRECT"  # 设 0 则全部走代理（墙内用）
+
+# 直连就明确有问题的域名。实测 GitHub raw 直连会在 268KB 处截断
+# （目标文件 2.3MB），静默拿到半个文件；走代理才完整。
+# ModelScope **不在此列**：直连 35 MB/s，走代理只有 240 KB/s。
+BUILTIN_PROXY_HOSTS = (
+    "github.com",
+    "githubusercontent.com",
+    "githubassets.com",
+)
+
+_direct_openers: dict[bool, object] = {}
+_direct_failed: set[str] = set()      # 记下"这些域名直连不行"
 
 
-def _opener():
-    """支持用环境变量指定代理。本机实测 ModelScope 直连可用，
-    但 GitHub（VAD 模型所在）需要代理。"""
-    proxy = os.environ.get(PROXY_ENV)
-    if proxy:
-        return urllib.request.build_opener(
-            urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
-    return _OPENER
+def _reset_route_cache() -> None:
+    """测试用：环境变量变了要能重新决策"""
+    _direct_openers.clear()
+    _direct_failed.clear()
+
+
+def _proxy_url() -> str:
+    return (os.environ.get(PROXY_ENV) or "").strip()
+
+
+def _host_of(url: str) -> str:
+    try:
+        return urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return ""
+
+
+def _proxy_hosts() -> tuple[str, ...]:
+    extra = [h.strip().lower() for h in
+             os.environ.get(PROXY_HOSTS_ENV, "").split(",") if h.strip()]
+    return tuple(h.lower() for h in BUILTIN_PROXY_HOSTS) + tuple(extra)
+
+
+def _use_proxy(url: str) -> bool:
+    """这个 URL 要不要走代理。
+
+    默认直连。三种情况走代理：
+    1. `VIDSUB_FORCE_DIRECT=0`（用户明确要求，墙内场景）
+    2. 域名在代理名单里（GitHub 实测直连会截断）
+    3. 这个域名刚才直连失败过（自动回退，且记住以免每次重试都卡超时）
+    """
+    if not _proxy_url():
+        return False
+    if os.environ.get(FORCE_DIRECT_ENV, "1") == "0":
+        return True
+    host = _host_of(url).lower()
+    if not host:
+        return False
+    if _direct_failed_hosts() and host in _direct_failed:
+        return True
+    return any(host == h or host.endswith("." + h) for h in _proxy_hosts())
+
+
+def _direct_failed_hosts() -> bool:
+    return bool(_direct_failed)
+
+
+def _raw_open(url: str, start: int, use_proxy: bool):
+    """真正发起一次请求。拆出来是为了测试能替换它。"""
+    req = urllib.request.Request(url, headers={"User-Agent": "vidsub/0.1"})
+    if start:
+        req.add_header("Range", f"bytes={start}-")
+    if use_proxy:
+        proxy = _proxy_url()
+        opener = _direct_openers.get(True)
+        if opener is None:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+            _direct_openers[True] = opener
+    else:
+        opener = _direct_openers.get(False)
+        if opener is None:
+            # 必须显式清空代理：否则会捡起 http_proxy 环境变量 / 系统设置，
+            # 把请求绕到代理上去 —— 之前踩过，本地回环请求被劫持。
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            _direct_openers[False] = opener
+    return opener.open(req, timeout=_timeout())
+
+
+def _timeout() -> int:
+    return int(os.environ.get("VIDSUB_DOWNLOAD_TIMEOUT", "60"))
+
+
+def _open(url: str, start: int = 0):
+    """按域名选路；直连失败（网络层）时自动回退代理。
+
+    只对**网络层**错误回退：HTTP 4xx/5xx 说明请求本身有问题
+    （404 是路径写错、416 是范围不合法），换个出口也是同样的结果，
+    重试只会浪费时间并把真正的错误信息冲淡。
+    """
+    want_proxy = _use_proxy(url)
+    try:
+        return _raw_open(url, start, want_proxy)
+    except urllib.error.HTTPError:
+        raise                      # HTTP 错误不重试
+    except (urllib.error.URLError, OSError, TimeoutError):
+        if want_proxy or not _proxy_url():
+            raise                  # 已经走代理了，或压根没代理可走
+        host = _host_of(url).lower()
+        if host:
+            _direct_failed.add(host)      # 记住，别每次重试都卡满超时
+        return _raw_open(url, start, True)
 
 
 @dataclass(frozen=True)
@@ -157,10 +256,8 @@ def _drop_sidecar(spec: AssetSpec) -> None:
 
 
 def _request(url: str, start: int = 0, timeout: int = 60):
-    req = urllib.request.Request(url, headers={"User-Agent": "vidsub/0.1"})
-    if start:
-        req.add_header("Range", f"bytes={start}-")
-    return _opener().open(req, timeout=timeout)
+    """兼容旧调用点。选路逻辑在 _open 里。"""
+    return _open(url, start)
 
 
 def download_one(spec: AssetSpec,
