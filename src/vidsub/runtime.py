@@ -42,7 +42,7 @@ BIN_ENV = "VIDSUB_LLAMA_SERVER"
 
 
 class RuntimeError_(RuntimeError):
-    pass
+    """本模块所有异常的根。留着是为了让 except RuntimeError_ 一次抓全。"""
 
 
 class StartupError(RuntimeError_):
@@ -60,6 +60,15 @@ class RuntimeMissingError(StartupError):
     StartupError 统一转成 503 + 可读消息，不用再单独开一个 except 分支
     —— 漏掉分支的代价是用户看到一个 500 Internal Server Error。
     """
+
+
+# 服务状态。用常量而不是裸字符串：字面量在代码里散着十几处，
+# 拼错一个不会报错，只会让那个状态永远匹配不上。
+STATE_STOPPED = "stopped"
+STATE_STARTING = "starting"
+STATE_READY = "ready"
+STATE_STOPPING = "stopping"
+STATE_FAILED = "failed"
 
 
 @dataclass(frozen=True)
@@ -173,7 +182,7 @@ def find_llama_server(bin_dir: str = "") -> str:
 class Running:
     spec: ServiceSpec
     pid: Optional[int] = None
-    state: str = "stopped"        # stopped | starting | ready | failed
+    state: str = STATE_STOPPED        # stopped | starting | ready | failed
     log_path: str = ""
     error: str = ""
     last_used: float = 0.0
@@ -240,9 +249,21 @@ class Runtime:
         out: list[dict] = []
         for spec in specs:
             out.append(self._ensure_one(spec))
-        if self.idle_timeout > 0 and not self._reaper:
-            self.start_idle_reaper()
+        self._ensure_reaper()
         return out
+
+    def _ensure_reaper(self) -> None:
+        """空闲巡检线程该在的时候必须在。
+
+        判据是 **is_alive() 而不是"有没有这个对象"**：stop_all() 会让线程
+        正常退出，但 self._reaper 仍指着那个已死对象。只判存在的话，
+        「停止 → 再启动」之后巡检就永远不再恢复 —— 而这恰恰是文档里推荐的
+        操作流程，结果 4.3 GB 内存一直挂着不回收。
+        """
+        if self.idle_timeout <= 0:
+            return
+        if self._reaper is None or not self._reaper.is_alive():
+            self.start_idle_reaper()
 
     def _ensure_one(self, spec: ServiceSpec) -> dict:
         with self._lock:
@@ -250,7 +271,7 @@ class Runtime:
             run = self._services.setdefault(spec.key, Running(spec=spec))
 
             if self._healthy(run) and self._alive(run.pid):
-                run.state = "ready"
+                run.state = STATE_READY
                 run.last_used = time.time()
                 return self._describe(run)
 
@@ -263,7 +284,7 @@ class Runtime:
 
             os.makedirs(self.log_dir, exist_ok=True)
             run.log_path = os.path.join(self.log_dir, f"{spec.key}.log")
-            run.state = "starting"
+            run.state = STATE_STARTING
             run.error = ""
             self._launch(run)
             return self._await_ready(run)
@@ -289,18 +310,18 @@ class Runtime:
         deadline = time.monotonic() + self.startup_timeout
         while time.monotonic() < deadline:
             if self._healthy(run):
-                run.state = "ready"
+                run.state = STATE_READY
                 run.last_used = time.time()
                 return self._describe(run)
             if not self._alive(run.pid):
-                run.state = "failed"
+                run.state = STATE_FAILED
                 run.error = f"进程已退出（pid {run.pid}）"
                 raise StartupError(
                     f"[{run.spec.key}] {run.spec.label} 启动失败：{run.error}\n"
                     f"命令行：{' '.join(self._argv_for(run.spec))}\n"
                     f"日志：{run.log_path}\n{tail(run.log_path)}")
             time.sleep(0.25)
-        run.state = "failed"
+        run.state = STATE_FAILED
         run.error = f"等待就绪超过 {self.startup_timeout:.0f}s"
         raise StartupError(
             f"[{run.spec.key}] {run.spec.label} 启动超时"
@@ -329,8 +350,8 @@ class Runtime:
         with self._lock:
             out = []
             for run in self._services.values():
-                if run.state in ("starting", "ready") and not self._alive(run.pid):
-                    run.state = "stopped"      # 别把死进程报成 ready
+                if run.state in (STATE_STARTING, STATE_READY) and not self._alive(run.pid):
+                    run.state = STATE_STOPPED      # 别把死进程报成 ready
                 out.append(self._describe(run))
             return out
 
@@ -354,7 +375,7 @@ class Runtime:
         """标记"正在用"，推迟空闲退出"""
         with self._lock:
             for run in self._services.values():
-                if run.state == "ready":
+                if run.state == STATE_READY:
                     run.last_used = time.time()
 
     def start_idle_reaper(self, interval: float = 0.0) -> threading.Thread:
@@ -385,18 +406,28 @@ class Runtime:
         return self._reaper
 
     def reap_idle(self) -> list:
-        """空闲超时就退出，别长期占着几 GB 内存。返回被关掉的。"""
+        """空闲超时就退出，别长期占着几 GB 内存。返回被关掉的。
+
+        **杀进程必须在锁外**：`taskkill` 有 30 秒超时、`proc.wait` 还有 10 秒，
+        锁内做这些会把 `status()` / `touch()` 一起堵住 40 秒 —— 而
+        /api/runtime/touch 是作业运行中被高频调用的。顺带也避免了与
+        stop_all 同时杀同一个进程（双 taskkill + 并发 Popen.wait）。
+        """
         if self.idle_timeout <= 0:
             return []
         now = time.time()
-        dead: list[str] = []
+        victims: list[Running] = []
         with self._lock:
             for run in self._services.values():
-                if run.state != "ready" or not run.last_used:
+                if run.state != STATE_READY or not run.last_used:
                     continue
                 if now - run.last_used >= self.idle_timeout:
-                    self._kill(run)
-                    dead.append(run.spec.key)
+                    run.state = "stopping"
+                    victims.append(run)
+        dead: list[str] = []
+        for run in victims:
+            self._kill(run)
+            dead.append(run.spec.key)
         return dead
 
     # --- 退出 ------------------------------------------------------------
@@ -416,7 +447,7 @@ class Runtime:
     def _kill(self, run: Running) -> None:
         pid = run.pid
         if not pid:
-            run.state = "stopped"
+            run.state = STATE_STOPPED
             return
         kill_tree(pid)
         if run.proc is not None:
@@ -426,11 +457,7 @@ class Runtime:
                 pass
         run.pid = None
         run.proc = None
-        run.state = "stopped"
-
-    def shutdown(self) -> None:
-        """给 atexit / 信号处理用：收干净再退出"""
-        self.stop_all()
+        run.state = STATE_STOPPED
 
 
 def tail(path: str, n: int = 20) -> str:

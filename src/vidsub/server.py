@@ -110,10 +110,17 @@ def health():
 # 拒绝启动、让 ffmpeg 的字幕滤镜打不开文件。这条约束贯穿全项目。
 
 def data_dir() -> str:
-    base = os.environ.get("VIDSUB_DATA_DIR") or os.path.join(
-        os.path.expanduser("~"), ".vidsub")
-    os.makedirs(base, exist_ok=True)
-    return os.path.join(base, "models")
+    """权重落盘目录。
+
+    刻意**委托**给 runtime.default_model_root()，不自己再拼一遍：那个函数
+    知道"用户名带空格时要躲开"这条约束（llama-server 收到含空格的模型绝对
+    路径会报 invalid argument 直接拒绝启动）。早先两边各拼一份，结果服务侧
+    完全绕开了躲避逻辑 —— 对 "John Smith" 这样的用户名，每次启动都撞
+    SpaceInPathError，而躲避逻辑一次都没执行过。
+    """
+    root = runtime.default_model_root()
+    os.makedirs(root, exist_ok=True)
+    return root
 
 
 _manager: DownloadManager | None = None
