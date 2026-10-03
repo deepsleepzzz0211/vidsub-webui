@@ -511,14 +511,6 @@ def scan_directory(root: str, wanted: Optional[dict] = None) -> list[Found]:
     return out
 
 
-def adopt_all_from(spec: AssetSpec, scan_root: str) -> list[AdoptResult]:
-    """把扫描到的、与 spec 对得上的那个收编进来"""
-    hits = [f for f in scan_directory(scan_root) if f.key == spec.key]
-    if not hits:
-        return [AdoptResult(ok=False, error="目录里没找到可用的文件")]
-    return [adopt(spec, hits[0].path)]
-
-
 def copy_license_files(root: str) -> list[str]:
     """把第三方协议全文复制到数据目录。
 

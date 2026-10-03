@@ -84,14 +84,6 @@ def open_browser_after_ready(port: int, ready=None, timeout: float = 30.0):
     return t
 
 
-def find_running_instance(candidates) -> int | None:
-    """在候选端口里找出已经在跑的实例"""
-    for port in candidates:
-        if is_our_instance(port):
-            return port
-    return None
-
-
 class _ProbeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == PROBE_PATH:

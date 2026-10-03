@@ -181,11 +181,6 @@ def start_download():
     return {"task_id": task.id, "state": "running"}
 
 
-@app.get("/api/models/status")
-def download_status(task_id: str | None = None):
-    return store().progress(task_id)
-
-
 @app.post("/api/models/adopt")
 def adopt_manual(payload: dict = None):
     """用户手动指一个目录：按 sha256 认领里面已有的权重。

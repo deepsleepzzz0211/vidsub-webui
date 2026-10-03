@@ -95,8 +95,7 @@ def _patch_pipeline(monkeypatch):
     monkeypatch.setattr(jobs.pipeline, "run", _fake_run)
     # 跳过真运行时，直接起作业
     monkeypatch.setattr("vidsub.server._ensure_runtime_then_start",
-                        lambda job_id: jobs.JobManager().start(job_id)
-                        if False else _start_directly(job_id))
+                        _start_directly)
 
 
 def _wait_state(job_id: str, want: str, timeout: float = 5.0) -> dict:
@@ -151,10 +150,16 @@ def test_valid_upload_creates_and_finishes_job(client, monkeypatch):
 def test_upload_probe_populates_media_info(client, monkeypatch):
     _seed_models()
     _patch_pipeline(monkeypatch)
-    r = client.post("/api/jobs", files={"file": ("a.wav", _wav_bytes(), "audio/wav")})
+    body = _wav_bytes()
+    r = client.post("/api/jobs", files={"file": ("a.wav", body, "audio/wav")})
     job = r.json()
     assert job["info"]["duration"] == pytest.approx(1.0, abs=0.5)
-    assert job["info"]["size_bytes"] == r.request.stream if False else True
+    # 体积要等于**实际上传的字节数**：页面上那个"体积"得和用户在文件管理器
+    # 里看到的一致，不能是 ffprobe 按码率估出来的值。
+    #
+    # （这行以前写的是 `== r.request.stream if False else True` —— 三元条件
+    # 恒真，断言从来没执行过。`r.request.stream` 还是个流对象、根本不是尺寸。）
+    assert job["info"]["size_bytes"] == len(body)
     assert job["info"]["has_audio"] is True
 
 

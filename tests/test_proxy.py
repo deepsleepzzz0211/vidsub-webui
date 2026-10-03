@@ -28,7 +28,6 @@ MS_URL = ("https://www.modelscope.cn/api/v1/models/org/repo"
           "?Revision=master&FilePath=a.gguf")
 GH_URL = ("https://raw.githubusercontent.com/snakers4/silero-vad/v5.1.2/"
           "src/silero_vad/data/silero_vad.onnx")
-HF_URL = "https://huggingface.co/org/repo/resolve/main/a.gguf"
 
 
 @pytest.fixture(autouse=True)

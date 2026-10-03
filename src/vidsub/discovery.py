@@ -66,10 +66,6 @@ def cache_roots() -> list[CacheRoot]:
     return out
 
 
-def _roots_of(kind: str) -> list[CacheRoot]:
-    return [r for r in cache_roots() if r.kind == kind]
-
-
 def _sized_ok(path: str, expect: int) -> bool:
     """体积必须精确对上。
 

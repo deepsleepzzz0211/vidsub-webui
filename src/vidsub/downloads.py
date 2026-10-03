@@ -24,8 +24,6 @@ class Task:
     id: str
     state: str = STATE_IDLE
     error: str = ""
-    started_at: float = 0.0
-    finished_at: float = 0.0
     items: dict = field(default_factory=dict)      # key -> {state, have, total, label}
     canceled: bool = False
 
@@ -144,7 +142,6 @@ class DownloadManager:
                 self._current = tid
                 task = self._tasks[tid]
                 task.state = STATE_RUNNING
-                task.started_at = time.time()
 
             try:
                 ok = self._run_task(task)
@@ -159,8 +156,6 @@ class DownloadManager:
                     task.state = STATE_ERROR
                     task.error = f"{type(e).__name__}: {e}"
             finally:
-                with self._lock:
-                    task.finished_at = time.time()
                 self._notify()
 
     def _run_task(self, task: Task) -> bool:

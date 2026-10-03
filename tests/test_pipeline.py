@@ -91,11 +91,6 @@ def _silent_wav(tmp_path, name="a.wav", seconds=1.0):
     return str(p)
 
 
-def _seg(tmp_path, name, seconds=0.4):
-    """一段能让 ffmpeg -c copy 截出的小 wav"""
-    return _silent_wav(tmp_path, name, seconds=seconds)
-
-
 def _silent_wav_at(path, seconds=1.0):
     """在**指定路径**写一个静音 wav —— 供 extract_audio 的 mock 使用，
     让它钉到 pipeline 期望的 work_dir 位置上。"""
@@ -155,7 +150,6 @@ def test_write_srt_empty_cue_does_not_break_numbering(tmp_path):
     out = str(tmp_path / "o.srt")
     pipeline.write_srt([(0, 1, "", ""), (1.2, 2.0, "ok", "好")], out)
     body = open(out, encoding="utf-8").read()
-    assert "1\n" in body or True
     # 序号必须从 1 开始而不是出现空序号
     lines = [l for l in body.splitlines() if l.strip()]
     assert lines[0] == "1"

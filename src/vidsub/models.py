@@ -146,6 +146,10 @@ class Report:
             items = [{"key": i.key, "label": i.label, "state": i.state,
                       "have": i.have_bytes, "total": i.size_bytes,
                       "note": i.license_note} for i in self.items]
+        # 没有任务时也要给出 `state`（idle）与 `error`（空）：页面无条件读
+        # 这两个字段，缺了会拿到 undefined。契约稳定比少一个键重要。
+        task.setdefault("state", "idle")
+        task.setdefault("error", "")
         return {
             "ready": self.ready,
             "items": items,
@@ -203,11 +207,6 @@ class AcquireReport:
     def any_found(self) -> bool:
         return any(o.found for o in self.outcomes)
 
-    @property
-    def all_ok(self) -> bool:
-        return bool(self.outcomes) and all(o.ok or o.skipped
-                                           for o in self.outcomes)
-
     def as_dict(self) -> dict:
         return {"source": self.source,
                 "results": [o.as_dict() for o in self.outcomes]}
@@ -227,10 +226,6 @@ class Task:
 
     def wait(self, timeout: float = 600.0) -> bool:
         return self._manager.wait_idle(timeout)
-
-    @property
-    def done(self) -> bool:
-        return self.progress().get("state") in ("done", "error")
 
 
 class ModelStore:
@@ -416,11 +411,7 @@ class ModelStore:
     def download(self) -> Task:
         """启动（或排队）后台下载，立即返回句柄。
 
-        幂等：已就绪的权重会被跳过，重复调用只是再排一次队。失败不会在
+        幂等：已就绪的会被权重跳过，重复调用只是再排一次队。失败不会在
         调用线程抛 —— 落在 `progress()["error"]` 与逐项 `state="failed"` 上。
         """
         return Task(id=self._manager.start(), _manager=self._manager)
-
-    def progress(self, task_id: Optional[str] = None) -> dict:
-        """下载进度。没有任务时返回磁盘现状（下载页首次加载就走这条）。"""
-        return self._manager.snapshot(task_id)

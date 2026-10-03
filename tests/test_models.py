@@ -428,8 +428,16 @@ def test_download_returns_task_handle(store, fake_assets):
     assert set(t.progress()) >= {"state", "items"}
 
 
-def test_progress_without_task_reflects_disk(store, fake_assets):
-    """下载页首次加载时还没有任务，这时要反映磁盘现状而不是报错"""
-    p = store.progress()
-    assert p["state"] in ("idle", "done")
-    assert len(p["items"]) == len(fake_assets)
+def test_idle_inspect_reports_idle_state_and_disk_items(store, fake_assets):
+    """没有下载任务时，`state` 要是 idle、`items` 要回落到磁盘现状。
+
+    页面无条件读 `state`/`error`/`items` 这三个字段；缺任何一个都会拿到
+    undefined。契约稳定比少一个键重要 —— 这条钉住它。
+    """
+    r = store.inspect()
+    assert r.download == {}, "没有任务时不该有任务快照"
+
+    d = r.as_dict()
+    assert d["state"] == "idle"
+    assert d["error"] == ""
+    assert len(d["items"]) == len(fake_assets), "没任务时要回落到磁盘现状"

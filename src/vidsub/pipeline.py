@@ -112,10 +112,6 @@ def translate(text: str, target: str = "Chinese",
     raise PipelineError(last)
 
 
-def fmt_ts(sec: float) -> str:
-    return styles._ts(sec)
-
-
 def write_srt(cues: list, path: str, mono: bool = False,
               style: Optional[str] = None) -> None:
     """渲染 SRT。中文在上、英文在下（mono 只留中文行）。
@@ -123,7 +119,6 @@ def write_srt(cues: list, path: str, mono: bool = False,
     长 cue 会先做分段（07）—— 否则一整条字会盖掉整个幻灯片。
     序号与时间轴必须保留 —— 只拼文本行产出的不是合法 SRT。
     """
-    from . import styles
     style = style or ("mono" if mono else "bilingual")
     body = styles.format_srt(cues, style=style)
     with open(path, "w", encoding="utf-8") as f:

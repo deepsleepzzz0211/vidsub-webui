@@ -67,7 +67,6 @@ class RuntimeMissingError(StartupError):
 STATE_STOPPED = "stopped"
 STATE_STARTING = "starting"
 STATE_READY = "ready"
-STATE_STOPPING = "stopping"
 STATE_FAILED = "failed"
 
 

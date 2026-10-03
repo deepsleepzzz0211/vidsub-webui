@@ -212,22 +212,3 @@ def test_scan_reports_nothing_for_empty_dir(tmp_path):
 def test_scan_tolerates_missing_dir(tmp_path):
     """目录不存在时给空结果而不是抛异常（用户可能填错路径）"""
     assert downloader.scan_directory(str(tmp_path / "nope")) == []
-
-
-def test_adopt_all_from_directory(tmp_path):
-    """一步收编目录里所有能认出的权重"""
-    asset = _fake_asset("alpha", b"AAAA-body-1")
-    scan = tmp_path / "library"
-    _make(scan / "gguf", "Confucius4-R2T2-Q4_K_M.gguf", b"AAAA-body-1")
-
-    saved = registry.ASSETS
-    try:
-        registry.ASSETS = (asset,)
-        spec = downloader.spec_for(asset, str(tmp_path / "data"))
-        got = downloader.adopt_all_from(spec, str(scan))
-    finally:
-        registry.ASSETS = saved
-
-    assert len(got) == 1
-    assert got[0].ok, got[0].error
-    assert os.path.exists(spec.dest)
