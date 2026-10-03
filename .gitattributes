@@ -1,0 +1,64 @@
+# ============================================================
+# .gitattributes
+#
+# 解决的问题：Windows 上 git 默认 core.autocrlf=true，检出时把 LF 换成
+# CRLF、提交时再换回去。只要有一个协作者或 CI 跑在 Linux/macOS 上，
+# 同一次改动就会因为行尾差异产生**整文件 diff**，评审时什么都看不出来。
+#
+# 策略：**仓库内一律 LF**，检出时按平台转换。这样 diff 干净、跨平台一致，
+# 而 Windows 上的编辑器也不会看到乱码行尾。
+# ============================================================
+
+# 默认：自动识别文本，仓库内统一 LF
+* text=auto eol=lf
+
+# --- 明确按文本处理（避免被当成二进制）-------------------------
+*.py    text
+*.pyi   text
+*.ts    text
+*.js    text
+*.json  text
+*.html  text
+*.css   text
+*.md    text
+*.toml  text
+*.cfg   text
+*.ini   text
+*.txt   text
+*.yml   text
+*.yaml  text
+*.srt   text
+
+# --- Windows 专用脚本必须保持 CRLF -----------------------------
+# cmd.exe 对 LF 结尾的 .bat/.cmd 处理不可靠（某些版本会在行尾吞字符），
+# 所以这类文件不能用默认的 eol=lf。目前仓库里没有，留着防止将来踩坑。
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# --- 二进制：禁止行尾转换与 diff --------------------------------
+# 对二进制做行尾转换会**损坏文件**（PNG 里恰好出现 0x0A 就会被动），
+# 而 git 默认会尝试。必须显式标记。
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.mp4   binary
+*.webm  binary
+*.mkv   binary
+*.mov   binary
+*.wav   binary
+*.mp3   binary
+*.aac   binary
+*.m4a   binary
+*.flac  binary
+*.gguf  binary
+*.onnx  binary
+*.safetensors binary
+
+# --- lock 文件在 diff 里折叠 -----------------------------------
+# 依赖锁文件通常几千行，评审时噪音极大。标成 linguist-generated 让
+# GitHub 默认折叠它们；不标 diff 也没问题，纯粹为了少点视觉噪音。
+package-lock.json  -diff linguist-generated
