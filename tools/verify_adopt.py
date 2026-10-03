@@ -1,7 +1,12 @@
 """拿真实的 r2t2-test 权重走一遍收编，确认不下载也能就位。
 
 不是正式测试，是端到端手工验证：
-    python tools/verify_adopt.py [源目录] [数据目录]
+    python tools/verify_adopt.py [源目录] [模型根目录]
+
+**第二个参数是"模型根"（权重直接落在它下面），不是数据目录** —— 服务那边
+数据目录下还有一层 `models/`，即 `<VIDSUB_DATA_DIR>/models`。传错了不会报错，
+只会得到"收编成功但服务说权重没就绪"，很难查，所以这里写清楚。
+（默认值就带 `models`，照着默认值的形状传即可。）
 
 这个脚本以前自己拼「扫目录 → spec_for → adopt → 逐条报告 → 查最终状态」，
 和 server.py::rescan_caches、verify_runtime.py 各写了一遍。现在这套协议由
