@@ -195,7 +195,7 @@ export const test = base.extend<Fixtures>({
         if (!realModels || !existsSync(realModels)) {
           throw new Error(
             '用例要求真权重，但没设 VIDSUB_REAL_MODELS_DIR。\n' +
-            '  例：$env:VIDSUB_REAL_MODELS_DIR="D:\\vsdata\\models"',
+            '  例：$env:VIDSUB_REAL_MODELS_DIR="D:\\vidsub\\models"',
           );
         }
         symlinkSync(realModels, path.join(dir, 'models'), 'junction');

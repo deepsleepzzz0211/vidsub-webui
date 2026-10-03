@@ -6,7 +6,7 @@ import path from 'node:path';
  *
  * 真模型链路，只有备好权重+二进制时才跑：
  *   $env:VIDSUB_REAL_MODELS=1
- *   $env:VIDSUB_REAL_MODELS_DIR="D:\vsdata\models"   # 只挂权重，jobs 仍隔离
+ *   $env:VIDSUB_REAL_MODELS_DIR="D:\vidsub\models"   # 只挂权重，jobs 仍隔离
  *   $env:VIDSUB_LLAMA_SERVER="...\llama-server.exe"
  * 没设就 skip —— 组件级确定性由 pytest 覆盖。
  */

@@ -7,7 +7,9 @@
     python tools/verify_runtime.py [权重源目录] [数据目录] [llama-server 路径]
 
 注意数据目录要**不含空格**且与源目录**同卷**，认领才能走硬链接（零拷贝）。
-本机项目目录 "workbuddy en" 带空格，正好是这条约束的现实用例。
+很多 Windows 项目目录本身带空格（"My Projects" 之类），正好是这条约束的
+现实用例 —— 默认值走 `runtime.default_model_root()`，它会躲开含空格的
+用户目录。
 """
 import os
 import sys
@@ -28,7 +30,9 @@ def human(n: int) -> str:
 
 def main() -> int:
     src = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_SRC
-    root = sys.argv[2] if len(sys.argv) > 2 else r"D:\vsdata\models"
+    # 默认用项目统一的模型目录（认 VIDSUB_DATA_DIR），不写死盘符 ——
+    # 写死会让别人机器上直接跑不通，而错误信息还看不出是"默认值不对"。
+    root = sys.argv[2] if len(sys.argv) > 2 else runtime.default_model_root()
     exe = sys.argv[3] if len(sys.argv) > 3 else None
     exe = exe or os.path.join(os.path.abspath(src), "bin",
                               runtime.binary_name())

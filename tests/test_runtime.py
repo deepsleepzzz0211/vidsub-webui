@@ -264,7 +264,7 @@ def test_missing_model_file_is_reported_clearly(models, tmp_path):
 def test_model_path_passed_relative_and_has_no_space(models, tmp_path):
     """核心约束：绝对路径含空格会让 llama-server 拒绝启动。
 
-    本机项目目录就叫 "workbuddy en"（带空格），踩过这个坑。
+    这条不是假想 —— Windows 上项目目录带空格很常见，实测踩过。
     """
     seen = {}
 

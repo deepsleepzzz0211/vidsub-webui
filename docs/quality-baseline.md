@@ -89,7 +89,7 @@
 ## 四、怎么复现
 
 ```powershell
-$env:VIDSUB_DATA_DIR="D:\vsdata"                 # 含 models/ 的目录
+$env:VIDSUB_DATA_DIR="D:\vidsub"                 # 含 models/ 的目录，别含空格
 $env:VIDSUB_LLAMA_SERVER="...\llama-server.exe"  # 路径可含空格
 $env:VIDSUB_IDLE_TIMEOUT="0"                     # 别让空闲巡检中途回收模型
 

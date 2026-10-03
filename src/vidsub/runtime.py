@@ -6,8 +6,8 @@
 三个方向相反、都要处理的坑：
 
 1. **路径含空格**：llama-server 收到含空格的模型绝对路径会报 `invalid
-   argument` 直接拒绝启动。本机项目目录就叫 "workbuddy en"（带空格），
-   实测踩过。做法：模型路径传**相对路径** + `cwd` 指到模型根。
+   argument` 直接拒绝启动。Windows 上项目目录带空格很常见（"My Projects"
+   之类），实测踩过。做法：模型路径传**相对路径** + `cwd` 指到模型根。
    注意**可执行文件路径含空格没关系**（Windows CreateProcess 自己处理），
    有问题的只是它自己解析的那个模型参数。
 2. **必须串行启动**：两个模型同时加载 2.5GB 时 `--load-mode mlock` 抢不到
@@ -296,8 +296,7 @@ class Runtime:
             if " " in self._cwd:
                 raise SpaceInPathError(
                     f"模型目录含空格，llama-server 会拒绝启动：\n  {self._cwd}\n"
-                    f"含空格的绝对路径会让它报 invalid argument（实测踩过，"
-                    f"本机项目目录就叫 \"workbuddy en\"）。\n"
+                    f"含空格的绝对路径会让它报 invalid argument。\n"
                     f"请设 VIDSUB_DATA_DIR 指到一个不含空格的目录。")
 
             os.makedirs(self.log_dir, exist_ok=True)

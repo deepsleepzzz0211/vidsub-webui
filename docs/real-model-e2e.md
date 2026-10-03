@@ -9,8 +9,9 @@
 ## 一次性准备
 
 ```powershell
-# 1. 权重目录（D:\vsdata\models 下需有 r2t2/ hy-mt2/ vad/ 四个文件）
-$env:VIDSUB_REAL_MODELS_DIR="D:\vsdata\models"
+# 1. 权重目录（下面需有 r2t2/ hy-mt2/ vad/ 四个文件）
+#    路径换成你自己的，**不要含空格** —— llama-server 会拒绝启动
+$env:VIDSUB_REAL_MODELS_DIR="D:\vidsub\models"
 
 # 2. llama-server 二进制（路径**可以含空格**，只有模型参数路径怕空格）
 $env:VIDSUB_LLAMA_SERVER="D:\path\to\llama-server.exe"
@@ -42,7 +43,8 @@ E2E 夹具用**裸 `python`** 起服务（`spawn('python', ['-m', 'vidsub', ...]
 editable 装在系统 3.11 里的。跑之前把 3.11 提到最前：
 
 ```bash
-PATH="/c/Users/wzx/AppData/Local/Programs/Python/Python311:$PATH" \
+# 把装着 vidsub 的那个 Python 目录提到 PATH 最前（路径换成你自己的）
+PATH="/c/Users/<你的用户名>/AppData/Local/Programs/Python/Python311:$PATH" \
   npx playwright test --workers=1
 ```
 

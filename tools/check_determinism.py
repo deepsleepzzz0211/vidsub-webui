@@ -12,7 +12,7 @@
 本工具就是把这套对照实验固定下来，将来换模型/换 llama.cpp 版本时能一键复验。
 
 用法：
-    VIDSUB_DATA_DIR=D:\\vsdata python tools/check_determinism.py [--rounds 5]
+    VIDSUB_DATA_DIR=D:\\vidsub python tools/check_determinism.py [--rounds 5]
 
 退出码：0 全部稳定；1 有任一场景不稳定。
 """
