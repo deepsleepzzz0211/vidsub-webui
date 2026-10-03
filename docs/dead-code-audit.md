@@ -130,10 +130,24 @@ lambda job_id: ... if False else _start_directly(job_id)
 | 死接口 | `/api/models/status` + `ModelStore.progress()` |
 | 恒真/不可达 | `tests/test_server_jobs.py` ×2、`tests/test_pipeline.py` ×1 |
 | 未使用测试辅助 | `tests/test_pipeline.py::_seg`、`tests/test_proxy.py::HF_URL` |
+| 零引用文件 | `tools/verify_proxy.py`（见下） |
 
 删掉死接口后，`ModelStore` 正好剩三个入口点：
 `inspect()` / `acquire()` / `download()`。
 
-**仍未处理**：`tools/verify_proxy.py` 全仓零引用。它是个能跑的手工诊断
-脚本，但没有任何文档指向它 —— 要么在 README 的代理一节提一句让它可被
-发现，要么删掉。
+### 关于 `tools/verify_proxy.py`
+
+全仓零引用、无文档指向，已删除。
+
+它验证的**行为并没有丢**。`tests/test_proxy.py` 有 15 条用例覆盖同一套按域名
+选路的逻辑（默认直连 / ModelScope 恒直连 / GitHub 走代理 / 无代理仍直连 /
+强制代理 / 自定义域名 / 内置域名表 / 失败回退 / 记住失败避免重复超时 /
+不回退掩盖真 HTTP 错误），其中两条还**真的走 HTTP 下载** —— 只是对着本地起的
+小服务器（`local_server` 夹具），不是公网。
+
+被删掉的只是"打真实 ModelScope / GitHub 各下一次"那一层：它依赖外网、跑一次
+要拉真实权重，不适合放进常规验证；而它的两个断言（"走的是直连"、"文件完整"）
+已经被上面那套覆盖了。
+
+**教训**：手工诊断脚本如果没有任何文档指向它，就等于不存在。要么在 README
+里提一句让它可被发现，要么别留。
