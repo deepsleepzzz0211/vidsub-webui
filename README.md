@@ -301,7 +301,7 @@ pytest -m "not e2e_support"
 
 ## 维护者
 
-单人维护。仓库目前尚未发布到公开托管平台，发布后本节会补上地址。
+[@deepsleepzzz0211](https://github.com/deepsleepzzz0211)
 
 ## 致谢
 
@@ -313,8 +313,9 @@ pytest -m "not e2e_support"
 
 ## 贡献
 
-欢迎开 issue 讨论，也接受 PR。仓库发布后 Issues 会开在同一位置。
+欢迎开 issue 讨论，也接受 PR。
 
+提问或报 bug 请到 [Issues](https://github.com/deepsleepzzz0211/vidsub-webui/issues)。
 报 bug 时如果能附上：操作系统、Python 版本、视频的时长与编码、页面上显示的
 失败原因 —— 会快很多。
 
