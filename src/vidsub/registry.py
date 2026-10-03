@@ -121,14 +121,18 @@ ASSETS: tuple[Asset, ...] = (
     ),
 )
 
-_BY_KEY = {a.key: a for a in ASSETS}
-
-
 def get(key: str) -> Asset:
-    try:
-        return _BY_KEY[key]
-    except KeyError:
-        raise KeyError(f"未知权重：{key}；可用：{sorted(_BY_KEY)}") from None
+    """按 key 取资产。
+
+    每次从 `ASSETS` **现查**，不用 import 期建好的字典。那份缓存会在清单被
+    替换之后继续吐旧对象，而症状是"明明换了清单，拿到的还是旧的" —— 很难
+    查，而且踩它的不是测试代码，是 `discovery.hints_for_missing` 这类正常
+    路径。四个元素的线性查找，代价可以忽略。
+    """
+    for a in ASSETS:
+        if a.key == key:
+            return a
+    raise KeyError(f"未知权重：{key}；可用：{sorted(a.key for a in ASSETS)}")
 
 
 def total_size_bytes() -> int:

@@ -93,6 +93,22 @@ class DownloadManager:
                              (round(have / total, 4) if total else 0.0),
                 "have_bytes": have, "total_bytes": total, "items": items}
 
+    def active(self) -> Optional[str]:
+        """有任务在跑就返回它的 id，否则 None。
+
+        与 `snapshot()` 的区别：**这个不碰磁盘**。`snapshot()` 在没有任务的
+        时候会逐个查权重状态，而查状态要对整份权重算 sha256 —— 实测 2.4 GB
+        要 2.17 秒。首页每次加载都会问"有没有在下的"，用 snapshot() 就等于
+        每次开页面把 2.4 GB 从磁盘读一遍。
+
+        凡是不需要逐项进度、只想知道"有没有任务"的地方，一律用这个。
+        """
+        with self._lock:
+            for tid, t in self._tasks.items():
+                if t.state in (STATE_IDLE, STATE_RUNNING):
+                    return tid
+            return None
+
     def all_ready(self) -> bool:
         return all(downloader.status_of(s).state == "ready"
                    for s in downloader.all_specs(self.root))

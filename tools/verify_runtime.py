@@ -16,7 +16,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "src"))
 
-from vidsub import downloader, registry, runtime          # noqa: E402
+from vidsub import models, runtime                       # noqa: E402
 
 DEFAULT_SRC = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "r2t2-test")
@@ -51,20 +51,16 @@ def main() -> int:
 
     print()
     print("=== 1. 认领权重（校验 sha256）===")
-    hits = {h.key: h for h in downloader.scan_directory(os.path.abspath(src))}
-    for a in registry.ASSETS:
-        hit = hits.get(a.key)
-        if not hit:
-            print(f"  ✗ 源目录里没有 {a.key}")
-            return 1
     t0 = time.time()
-    for a in registry.ASSETS:
-        spec = downloader.spec_for(a, root)
-        r = downloader.adopt(spec, hits[a.key].path)
-        how = "hardlink" if r.linked else "copy"
-        print(f"  {a.key:10} {human(a.size_bytes):>10}  {how:8} "
-              f"{'OK' if r.ok else 'FAIL ' + r.error}")
-        if not r.ok:
+    rep = models.ModelStore(root).acquire(os.path.abspath(src))
+    for o in rep.outcomes:
+        if not o.found:
+            print(f"  ✗ 源目录里没有 {o.key}")
+            return 1
+        how = "hardlink" if o.linked else ("skip" if o.skipped else "copy")
+        print(f"  {o.key:10} {o.size_text:>10}  {how:8} "
+              f"{'OK' if (o.ok or o.skipped) else 'FAIL ' + o.error}")
+        if not (o.ok or o.skipped):
             return 1
     print(f"  耗时 {time.time() - t0:.1f}s")
 

@@ -21,7 +21,7 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "src"))
 
-from vidsub import downloader, pipeline, runtime  # noqa: E402
+from vidsub import models, pipeline, runtime     # noqa: E402
 
 EXIT_OK = 0
 EXIT_MISMATCH = 1
@@ -30,12 +30,11 @@ EXIT_SKIP = 3
 
 
 def _ready() -> bool:
-    models = runtime.default_model_root()
-    if not os.path.isdir(models):
+    root = runtime.default_model_root()
+    if not os.path.isdir(root):
         return False
     try:
-        return all(downloader.status_of(s).state == "ready"
-                   for s in downloader.all_specs(models))
+        return models.ModelStore(root).inspect().ready
     except Exception:
         return False
 

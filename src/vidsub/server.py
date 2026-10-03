@@ -18,9 +18,7 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import (FileResponse, JSONResponse, RedirectResponse,
                                StreamingResponse)
 
-from . import audio, discovery, downloader, launcher
-from . import registry, runtime
-from .downloads import DownloadManager
+from . import audio, launcher, models, runtime
 from .jobs import JobManager
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -92,7 +90,7 @@ def alive():
 def index():
     # 首次运行缺权重时，直接把人送到下载页 —— 否则会看到"能上传"的界面，
     # 然后在真正需要模型的时刻才失败。
-    if not manager().all_ready():
+    if not store().inspect().ready:
         return RedirectResponse("/downloads", status_code=307)
     page = os.path.join(WEB_DIR, "index.html")
     if os.path.exists(page):
@@ -124,9 +122,9 @@ def data_dir() -> str:
     return root
 
 
-_manager: DownloadManager | None = None
-_manager_root: str = ""
-_manager_lock = threading.Lock()
+_store: "models.ModelStore | None" = None
+_store_root: str = ""
+_store_lock = threading.Lock()
 _jobs: "JobManager | None" = None
 
 
@@ -138,20 +136,20 @@ def jobs() -> JobManager:
     return _jobs
 
 
-def manager() -> DownloadManager:
-    """取全局唯一的下载管理器。
+def store() -> models.ModelStore:
+    """取全局唯一的模型资产接缝。
 
     按数据目录缓存：目录变了就重建。早先只判断"有没有实例"，一旦进程内
     改过 `VIDSUB_DATA_DIR`（测试隔离、嵌入式调用），就会拿着旧目录继续跑，
     表现为"权重写到了奇怪的地方"或"明明下载完了却说没就绪"。
     """
-    global _manager, _manager_root
+    global _store, _store_root
     root = data_dir()
-    with _manager_lock:
-        if _manager is None or _manager_root != root:
-            _manager = DownloadManager(root)
-            _manager_root = root
-        return _manager
+    with _store_lock:
+        if _store is None or _store_root != root:
+            _store = models.ModelStore(root)
+            _store_root = root
+        return _store
 
 
 @app.post("/api/models/rescan")
@@ -161,59 +159,31 @@ def rescan_caches():
     收编而非重下：用户早就下过的模型不该再拉一遍 2.6 GB。
     收编前逐个过 sha256，认错了宁可不动。
     """
-    root = data_dir()
-    found = discovery.find_all()
-    results = []
-    for asset in registry.ASSETS:
-        hit = found.get(asset.key)
-        if not hit:
-            results.append({"key": asset.key, "ok": False,
-                            "error": "标准缓存里没找到"})
-            continue
-        res = downloader.adopt(downloader.spec_for(asset, root), hit["path"])
-        results.append({"key": asset.key, "label": asset.label,
-                        "source": hit["source"], "source_path": hit["path"],
-                        "ok": res.ok, "linked": res.linked,
-                        "skipped": res.skipped, "error": res.error})
-    downloader.copy_license_files(root)
-    return {"results": results, **models_status()}
-
-
-def cache_report() -> dict:
-    """下载页要展示的"我们找过哪些地方"—— 让用户知道不是随便没找到"""
-    return {
-        "roots": [{"kind": r.kind, "path": r.path, "exists": r.exists,
-                   "env_var": r.env_var} for r in discovery.cache_roots()],
-        "found": discovery.find_all(),
-    }
+    rep = store().acquire()
+    return {**rep.as_dict(), **models_status()}
 
 
 @app.get("/api/models")
 def models_status():
-    """权重现状：列表 + 体积 + 进度。前端据此决定显示上传页还是下载页。"""
-    m = manager()
-    snap = m.snapshot()
-    missing_keys = [i["key"] for i in snap["items"] if i["state"] != "ready"]
-    return {
-        "ready": m.all_ready(),
-        "missing": m.missing(),
-        "caches": cache_report(),
-        # 找不到时给"去魔搭下载"的指引（单文件、可续传）
-        "hints": discovery.hints_for_missing(missing_keys),
-        **snap,
-    }
+    """下载页要的一切：逐权重现状 + 找过哪些缓存 + 缺失指引 + 下载进度。
+
+    一个 `inspect()` 拿全。这几样本散在四个模块里（清单 / 扫缓存 / 下载 /
+    后台任务），拼装逻辑在这个文件里重写过两遍、在 tools/ 里重写过两遍 ——
+    现在调用方只需要知道这一个方法。
+    """
+    return store().inspect().as_dict()
 
 
 @app.post("/api/models/download")
 def start_download():
     """开始（或排队）下载。重复调用是安全的：已就绪的会被跳过。"""
-    task_id = manager().start()
-    return {"task_id": task_id, "state": "running"}
+    task = store().download()
+    return {"task_id": task.id, "state": "running"}
 
 
 @app.get("/api/models/status")
 def download_status(task_id: str | None = None):
-    return manager().snapshot(task_id)
+    return store().progress(task_id)
 
 
 @app.post("/api/models/adopt")
@@ -229,24 +199,15 @@ def adopt_manual(payload: dict = None):
     if not os.path.isdir(path):
         return JSONResponse({"error": f"目录不存在：{path}"}, status_code=400)
 
-    root = data_dir()
-    hits = downloader.scan_directory(path)
-    results = []
-    by_key = {h.key: h for h in hits}
-    for asset in registry.ASSETS:
-        hit = by_key.get(asset.key)
-        if not hit:
-            continue
-        res = downloader.adopt(downloader.spec_for(asset, root), hit.path)
-        results.append({"key": asset.key, "label": asset.label,
-                        "path": hit.path, "ok": res.ok,
-                        "linked": res.linked, "error": res.error})
-    if not results:
+    try:
+        rep = store().acquire(path)
+    except models.SourceError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    if not rep.any_found:
         return JSONResponse(
             {"error": "该目录里没找到可用的权重（按 sha256 校验）",
              "scanned": path}, status_code=404)
-    downloader.copy_license_files(root)
-    return {"results": results, **models_status()}
+    return {**rep.as_dict(), **models_status()}
 
 
 @app.get("/downloads")
@@ -263,10 +224,10 @@ def downloads_page():
 # 缺权重时不要贸然启动 —— 那必然失败，先让用户去下载页。
 
 def rt() -> runtime.Runtime:
-    """取全局唯一的运行时。按模型目录缓存（同 manager 的理由）。
+    """取全局唯一的运行时。按模型目录缓存（同 store 的理由）。
 
-    用独立的 Runtime 锁而不是复用 _manager_lock：stop_all 要花秒级去杀
-    进程，拿着下载管理器那把锁做这事会让所有下载状态查询一起卡住。
+    用独立的 Runtime 锁而不是复用 _store_lock：stop_all 要花秒级去杀
+    进程，拿着资产接缝那把锁做这事会让所有状态查询一起卡住。
     """
     global _rt, _rt_root
     root = data_dir()
@@ -297,8 +258,7 @@ def runtime_status():
 @app.post("/api/runtime/start")
 def runtime_start():
     """把两个推理服务拉起来。重复调用安全：已在跑的直接复用。"""
-    m = manager()
-    missing = [i["key"] for i in m.missing()]
+    missing = list(store().inspect().missing_keys)
     if missing:
         return JSONResponse(
             {"error": "权重还没齐，先去下载页", "missing": missing},
@@ -353,8 +313,7 @@ def runtime_log(key: str = "", tail: int = 60):
 @app.post("/api/jobs")
 async def create_job(file: UploadFile = File(...)):
     """上传视频 → 探测它 → 建 job → 后台跑流水线。"""
-    m = manager()
-    if not m.all_ready():
+    if not store().inspect().ready:
         return JSONResponse({"error": "模型还没齐全，先去下载页"}, status_code=409)
     if not file.filename:
         return JSONResponse({"error": "没有选择文件"}, status_code=400)
